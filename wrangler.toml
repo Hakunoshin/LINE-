@@ -7,6 +7,10 @@ binding = "DB"
 database_name = "personal-line-agent-db"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
-# 1分ごとに期限切れリマインダーをチェックしてLINEへプッシュ通知する
+# 1分ごとに期限切れリマインダーのチェックと毎日ダイジェスト送信時刻の判定を行う
 [triggers]
 crons = ["* * * * *"]
+
+[vars]
+# 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式。
+DAILY_DIGEST_TIME_JST = "08:00"

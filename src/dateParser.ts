@@ -184,3 +184,29 @@ export function formatJstDateTime(utcIso: string): string {
   const parts = toJstParts(new Date(utcIso));
   return `${parts.y}/${pad2(parts.m)}/${pad2(parts.d)} ${pad2(parts.h)}:${pad2(parts.min)}`;
 }
+
+/** 指定時刻をJSTとして見た「HH:MM」表記を返す（毎日ダイジェストの時刻比較用）。 */
+export function currentJstHm(now: Date = new Date()): string {
+  const parts = toJstParts(now);
+  return `${pad2(parts.h)}:${pad2(parts.min)}`;
+}
+
+/** 指定時刻をJSTとして見た「YYYY-MM-DD」を返す（重複送信防止の日付キー等に使用）。 */
+export function jstDateKey(now: Date = new Date()): string {
+  const parts = toJstParts(now);
+  return `${parts.y}-${pad2(parts.m)}-${pad2(parts.d)}`;
+}
+
+/** JSTの「今日」の範囲(00:00〜翌日00:00)をUTC ISO文字列で返す。Calendar APIのtimeMin/timeMax用。 */
+export function jstTodayRangeUtc(now: Date = new Date()): { startUtcIso: string; endUtcIso: string } {
+  const parts = toJstParts(now);
+  const startUtcIso = buildUtcIso(parts.y, parts.m, parts.d, 0, 0);
+  const nextDay = new Date(new Date(startUtcIso).getTime() + 86400000);
+  return { startUtcIso, endUtcIso: nextDay.toISOString() };
+}
+
+/** UTC ISO文字列をJSTの「YYYY-MM-DD」日付部分のみに変換する。Google Tasksのdueフィールド用。 */
+export function jstDateOnlyUtc(utcIso: string): string {
+  const parts = toJstParts(new Date(utcIso));
+  return buildUtcIso(parts.y, parts.m, parts.d, 0, 0);
+}
