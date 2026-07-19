@@ -5,7 +5,7 @@ compatibility_date = "2024-11-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "personal-line-agent-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "33f5b60d-0abd-40ed-8fbb-4f93041aecb1"
 
 # 1分ごとに期限切れリマインダーのチェックと毎日ダイジェスト送信時刻の判定を行う
 [triggers]
