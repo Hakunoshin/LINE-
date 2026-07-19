@@ -34,6 +34,40 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 カレンダーは読み取りのみ、ToDoはGoogle Tasksとの読み書きです（カレンダーへの書き込みは行いません）。
 
+### 成約報酬の比較（circus / peterpan / trueaim）
+
+企業名を送ると、人材紹介の**成約報酬が一番高い媒体**を判定して返します。
+
+```
+報酬 株式会社レオパレス21 理論年収500万
+```
+
+- **peterpan / trueaim**: 公開Notion・公開Googleスプレッドシートから**自動取得**（認証不要）
+- **circus**: 主に理論年収の取得元。`CIRCUS_EMAIL` / `CIRCUS_PASSWORD` を設定すると自動ログイン取得を試みます（未設定なら理論年収は手入力）
+
+報酬の書き方は2パターンに対応します。
+
+1. **固定額型**: `100万`、`120万円`、`一律60万円（税別）` などはその金額を成約報酬とする
+2. **料率型**: `35%`、`理論年収の35％`、`年収の35%` などは `理論年収 × 料率` で金額換算する
+
+`新卒：90万円 中途：年収の35%` のような混在表記も、金額・料率を全て拾って一番高い額で比較します。
+料率型を金額換算するには理論年収が必要なので、`理論年収500万` のように付けて送ってください
+（circus自動ログインが有効ならcircusから取得を試みます）。
+
+AI応答（下記）を有効にしていれば、「レオパレスの報酬どこが一番高い？理論年収500万」のような
+自然文でも同じ比較ができます。
+
+```bash
+# circus自動ログインを使う場合のみ（任意）
+npx wrangler secret put CIRCUS_EMAIL
+npx wrangler secret put CIRCUS_PASSWORD
+```
+
+> circusの内部APIはSPAから推定したもので公式仕様ではありません。ログイン方式
+> （email/password → `x-circus-authentication-token`）は判明していますが、理論年収の
+> レスポンス項目は実アカウントでの確認が必要です。取得に失敗した場合は理論年収の手入力に
+> フォールバックし、peterpan / trueaim の比較は問題なく動作します。
+
 ### AI応答（任意）
 
 `ANTHROPIC_API_KEY` を設定すると、コマンドに当てはまらないメッセージはすべてClaude（AI）が応答します。
@@ -144,6 +178,7 @@ Cloudflare Tunnel等でローカルサーバーを公開し、一時的にWebhoo
 src/
   index.ts               Honoアプリ本体。Webhook処理・OAuthルート・Cron Trigger
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
+  rewards.ts             成約報酬をcircus/peterpan/trueaimで比較(Notion/Sheet/circus取得+報酬パース)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
   db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD

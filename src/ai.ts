@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { addReminder, listPendingReminders, deleteReminder, getChatHistory, appendChatHistory } from "./db";
 import { formatJstDateTime, currentJstString, jstStringsToUtcIso, jstDateOnlyUtc } from "./dateParser";
 import { insertTask } from "./google";
+import { compareReward, formatComparison } from "./rewards";
 
 // LINEのテキストメッセージ上限は5000文字
 const LINE_TEXT_LIMIT = 4900;
@@ -16,6 +17,7 @@ export interface AiContext {
   userId: string;
   googleAccessToken: string | null;
   buildTodayDigest: (accessToken: string) => Promise<string>;
+  rewardEnv: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string };
 }
 
 const TOOLS: Anthropic.Tool[] = [
@@ -54,6 +56,22 @@ const TOOLS: Anthropic.Tool[] = [
     description:
       "Googleカレンダーの今日の予定とGoogle Tasksの未完了ToDoの一覧を取得する。今日の予定・タスクについて聞かれたときに呼ぶ。",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "compare_placement_reward",
+    description:
+      "ある企業の人材紹介の成約報酬を circus / peterpan / trueaim の3媒体で比較し、一番報酬が高い媒体を返す。ユーザーが企業名を挙げて「どこが一番報酬高い?」「◯◯の報酬比べて」等と聞いたときに呼ぶ。料率型(理論年収×◯%)の報酬を金額換算するには理論年収が必要。ユーザーが理論年収を言っていれば theory_income_man に渡す。",
+    input_schema: {
+      type: "object",
+      properties: {
+        company_name: { type: "string", description: "比較したい企業名。できるだけフルネーム" },
+        theory_income_man: {
+          type: "number",
+          description: "理論年収(万円)。ユーザーが指定した場合のみ。例: 500 は500万円",
+        },
+      },
+      required: ["company_name"],
+    },
   },
 ];
 
@@ -102,6 +120,18 @@ async function executeTool(ctx: AiContext, name: string, input: Record<string, u
         return `取得に失敗しました: ${(e as Error).message}`;
       }
     }
+    case "compare_placement_reward": {
+      const company = String(input.company_name ?? "").trim();
+      if (!company) return "エラー: company_name を指定してください。";
+      const theory =
+        typeof input.theory_income_man === "number" ? input.theory_income_man : null;
+      try {
+        const result = await compareReward(ctx.rewardEnv, company, theory);
+        return formatComparison(result);
+      } catch (e) {
+        return `報酬比較に失敗しました: ${(e as Error).message}`;
+      }
+    }
     default:
       return `エラー: 不明なツール ${name}`;
   }
@@ -115,6 +145,7 @@ function buildSystemPrompt(): string {
     "役割:",
     "- リマインダー/タスクの登録・確認・削除(ツールを使う)",
     "- 今日の予定・ToDoの確認(ツールを使う)",
+    "- 企業の成約報酬をcircus/peterpan/trueaimで比較(compare_placement_rewardツールを使う)",
     "- それ以外の質問や雑談にも普通に応じる",
     "",
     "返信のルール:",
