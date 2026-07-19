@@ -34,6 +34,23 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 カレンダーは読み取りのみ、ToDoはGoogle Tasksとの読み書きです（カレンダーへの書き込みは行いません）。
 
+### AI応答（任意）
+
+`ANTHROPIC_API_KEY` を設定すると、コマンドに当てはまらないメッセージはすべてClaude（AI）が応答します。
+
+- 「明日の朝9時にゴミ出しリマインドして」→ 自然な言葉のままリマインダー登録（Google Tasksにも反映）
+- 「今日って何か予定あったっけ？」→ カレンダー/ToDoを確認して回答
+- 「さっきのリマインダー消して」→ 会話の文脈を踏まえて削除
+- 雑談や質問にも普通に応答
+
+会話履歴（直近分）はD1に保存され、文脈を踏まえたやり取りができます。
+
+```bash
+npx wrangler secret put ANTHROPIC_API_KEY
+```
+
+APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成
@@ -126,11 +143,13 @@ Cloudflare Tunnel等でローカルサーバーを公開し、一時的にWebhoo
 ```
 src/
   index.ts               Honoアプリ本体。Webhook処理・OAuthルート・Cron Trigger
+  ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  db.ts                  D1へのリマインダー・Googleトークン・アプリ状態のCRUD
+  db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
+  0003_chat_history.sql  chat_historyテーブルのスキーマ
 ```

@@ -18,6 +18,7 @@ import {
   listIncompleteTasks,
   insertTask,
 } from "./google";
+import { handleWithAi } from "./ai";
 
 export interface Env {
   DB: D1Database;
@@ -29,6 +30,8 @@ export interface Env {
   // Google Cloud ConsoleでOAuthクライアント作成後に設定する。
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  // Anthropic APIキー。設定するとコマンド以外のメッセージをClaudeがAIとして応答する。
+  ANTHROPIC_API_KEY?: string;
   // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式のカンマ区切り)。未設定なら DEFAULT_DIGEST_TIMES。
   DAILY_DIGEST_TIME_JST?: string;
 }
@@ -45,6 +48,9 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・ヘルプ  … このメッセージを表示",
+  "",
+  "上記以外のメッセージはAI(Claude)が応答します。",
+  "例)「明日の朝ゴミ出しリマインドして」「今日って何かあったっけ？」",
   "",
   `毎日 ${DEFAULT_DIGEST_TIMES.join("/")} (JST) に自動配信されます`,
 ].join("\n");
@@ -215,6 +221,21 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
 
     return `リマインダーを登録しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)} ${parsed.content}${googleNote}`;
+  }
+
+  // コマンドに一致しない自由文はClaude(AI)が処理する
+  if (env.ANTHROPIC_API_KEY) {
+    try {
+      const accessToken = await getAccessTokenOrNull(env);
+      return await handleWithAi(env.ANTHROPIC_API_KEY, {
+        db: env.DB,
+        userId,
+        googleAccessToken: accessToken,
+        buildTodayDigest,
+      }, trimmed);
+    } catch (e) {
+      return `AI応答でエラーが発生しました: ${(e as Error).message}`;
+    }
   }
 
   return `コマンドを認識できませんでした。\n\n${HELP_TEXT}`;

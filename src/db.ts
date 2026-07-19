@@ -97,6 +97,48 @@ export async function getAppState(db: D1Database, key: string): Promise<string |
   return result?.value ?? null;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export async function getChatHistory(
+  db: D1Database,
+  userId: string,
+  limit: number
+): Promise<ChatMessage[]> {
+  const result = await db
+    .prepare(
+      `SELECT role, content FROM (
+         SELECT id, role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?
+       ) ORDER BY id ASC`
+    )
+    .bind(userId, limit)
+    .all<ChatMessage>();
+  return result.results ?? [];
+}
+
+export async function appendChatHistory(
+  db: D1Database,
+  userId: string,
+  role: "user" | "assistant",
+  content: string
+): Promise<void> {
+  await db
+    .prepare("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)")
+    .bind(userId, role, content)
+    .run();
+  // 古い履歴は残しても使わないので、直近50件だけ保持する
+  await db
+    .prepare(
+      `DELETE FROM chat_history WHERE user_id = ? AND id NOT IN (
+         SELECT id FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT 50
+       )`
+    )
+    .bind(userId, userId)
+    .run();
+}
+
 export async function setAppState(db: D1Database, key: string, value: string): Promise<void> {
   await db
     .prepare(

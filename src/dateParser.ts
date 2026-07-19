@@ -210,3 +210,22 @@ export function jstDateOnlyUtc(utcIso: string): string {
   const parts = toJstParts(new Date(utcIso));
   return buildUtcIso(parts.y, parts.m, parts.d, 0, 0);
 }
+
+/** "YYYY-MM-DD" と "HH:MM" (JST) をUTC ISO文字列に変換する。AIツール入力用。 */
+export function jstStringsToUtcIso(dateStr: string, timeStr: string): string | null {
+  const dateMatch = dateStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const timeMatch = timeStr.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (!dateMatch || !timeMatch) return null;
+  const h = Number(timeMatch[1]);
+  const min = Number(timeMatch[2]);
+  if (h > 23 || min > 59) return null;
+  return buildUtcIso(Number(dateMatch[1]), Number(dateMatch[2]), Number(dateMatch[3]), h, min);
+}
+
+/** 現在時刻をJST表記の文字列で返す。AIのシステムプロンプト用。 */
+export function currentJstString(now: Date = new Date()): string {
+  const parts = toJstParts(now);
+  const weekdays = ["日", "月", "火", "水", "木", "金", "土"];
+  const dayOfWeek = new Date(now.getTime() + 9 * 60 * 60 * 1000).getUTCDay();
+  return `${parts.y}年${parts.m}月${parts.d}日(${weekdays[dayOfWeek]}) ${pad2(parts.h)}:${pad2(parts.min)}`;
+}
