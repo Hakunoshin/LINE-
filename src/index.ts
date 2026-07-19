@@ -39,6 +39,11 @@ export interface Env {
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
 const TASK_COMMAND = "【タスク】";
 
+// 企業提案の前日準備タスク自動生成
+const PROPOSAL_MARKER = "【企業提案】";
+const RESEARCH_MARKER = "【企業調べ】";
+const PROPOSAL_PREP_TIME_JST = "07:30";
+
 const HELP_TEXT = [
   "使えるコマンド:",
   "・追加 <日時> <内容>  例) 追加 明日9:00 ゴミ出し",
@@ -287,10 +292,52 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
   }
 }
 
+// カレンダーの「【企業提案】〜様」の予定を検出し、当日締めの
+// 「【企業調べ】〜様」ToDoをGoogle Tasksに自動作成する。毎朝 07:30 (JST) に実行。
+async function runProposalPrepIfDue(env: Env): Promise<void> {
+  const now = new Date();
+  if (currentJstHm(now) !== PROPOSAL_PREP_TIME_JST) return;
+
+  const todayKey = jstDateKey(now);
+  const lastKey = await getAppState(env.DB, "last_proposal_prep_date");
+  if (lastKey === todayKey) return; // その日は処理済み
+
+  const accessToken = await getAccessTokenOrNull(env);
+  if (!accessToken) return; // 未連携なら何もしない
+
+  try {
+    const { startUtcIso, endUtcIso } = jstTodayRangeUtc(now);
+    const events = await listTodayEvents(accessToken, startUtcIso, endUtcIso);
+    const proposals = events.filter((ev) => ev.summary.includes(PROPOSAL_MARKER));
+
+    if (proposals.length === 0) {
+      await setAppState(env.DB, "last_proposal_prep_date", todayKey);
+      return;
+    }
+
+    // 既存の未完了ToDoと重複しないようにする
+    const existing = await listIncompleteTasks(accessToken);
+    const existingTitles = new Set(existing.map((t) => t.title));
+    const dueToday = jstDateOnlyUtc(now.toISOString());
+
+    for (const ev of proposals) {
+      const title = ev.summary.replace(PROPOSAL_MARKER, RESEARCH_MARKER).trim();
+      if (existingTitles.has(title)) continue;
+      await insertTask(accessToken, title, dueToday);
+      existingTitles.add(title);
+    }
+
+    await setAppState(env.DB, "last_proposal_prep_date", todayKey);
+  } catch {
+    // 失敗時はstate未更新のまま次の分に再試行される(作成済み分は重複チェックで回避)
+  }
+}
+
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runReminderCheck(env));
     ctx.waitUntil(runDailyDigestIfDue(env));
+    ctx.waitUntil(runProposalPrepIfDue(env));
   },
 };
