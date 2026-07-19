@@ -36,7 +36,7 @@ export interface Env {
   DAILY_DIGEST_TIME_JST?: string;
 }
 
-const DEFAULT_DIGEST_TIMES = ["06:00", "09:00", "12:00", "15:00", "18:00", "21:00"];
+const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
 const TASK_COMMAND = "【タスク】";
 
 const HELP_TEXT = [
