@@ -205,6 +205,15 @@ export function jstTodayRangeUtc(now: Date = new Date()): { startUtcIso: string;
   return { startUtcIso, endUtcIso: nextDay.toISOString() };
 }
 
+/** JSTの「翌日」の範囲(翌日00:00〜翌々日00:00)をUTC ISO文字列で返す。 */
+export function jstTomorrowRangeUtc(now: Date = new Date()): { startUtcIso: string; endUtcIso: string } {
+  const parts = toJstParts(now);
+  const todayStartUtc = new Date(buildUtcIso(parts.y, parts.m, parts.d, 0, 0));
+  const startUtcIso = new Date(todayStartUtc.getTime() + 86400000).toISOString();
+  const endUtcIso = new Date(todayStartUtc.getTime() + 2 * 86400000).toISOString();
+  return { startUtcIso, endUtcIso };
+}
+
 /** UTC ISO文字列をJSTの「YYYY-MM-DD」日付部分のみに変換する。Google Tasksのdueフィールド用。 */
 export function jstDateOnlyUtc(utcIso: string): string {
   const parts = toJstParts(new Date(utcIso));

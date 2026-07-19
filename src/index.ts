@@ -9,7 +9,7 @@ import {
   getAppState,
   setAppState,
 } from "./db";
-import { parseReminderInput, formatJstDateTime, currentJstHm, jstDateKey, jstTodayRangeUtc, jstDateOnlyUtc } from "./dateParser";
+import { parseReminderInput, formatJstDateTime, currentJstHm, jstDateKey, jstTodayRangeUtc, jstTomorrowRangeUtc, jstDateOnlyUtc } from "./dateParser";
 import {
   buildGoogleAuthUrl,
   exchangeCodeForTokens,
@@ -43,6 +43,9 @@ const TASK_COMMAND = "【タスク】";
 const PROPOSAL_MARKER = "【企業提案】";
 const RESEARCH_MARKER = "【企業調べ】";
 const PROPOSAL_PREP_TIME_JST = "07:30";
+
+// 翌日の予定を前日夜に予告する時刻 (JST)
+const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
 const HELP_TEXT = [
   "使えるコマンド:",
@@ -292,6 +295,38 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
   }
 }
 
+// 翌日の予定を前日夜(既定21:00 JST)にまとめてLINE予告する。予定が無い日は送らない。
+async function runTomorrowPreviewIfDue(env: Env): Promise<void> {
+  if (!env.ALLOWED_USER_ID) return;
+
+  const now = new Date();
+  if (currentJstHm(now) !== TOMORROW_PREVIEW_TIME_JST) return;
+
+  const todayKey = jstDateKey(now);
+  const lastKey = await getAppState(env.DB, "last_tomorrow_preview_date");
+  if (lastKey === todayKey) return;
+
+  const accessToken = await getAccessTokenOrNull(env);
+  if (!accessToken) return;
+
+  try {
+    const { startUtcIso, endUtcIso } = jstTomorrowRangeUtc(now);
+    const events = await listTodayEvents(accessToken, startUtcIso, endUtcIso);
+    if (events.length > 0) {
+      const lines = ["🌙 明日の予定"];
+      for (const ev of events) {
+        const time = ev.isAllDay ? "終日" : formatJstDateTime(ev.startIso).split(" ")[1];
+        lines.push(`・${time} ${ev.summary}`);
+      }
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, env.ALLOWED_USER_ID, lines.join("\n"));
+    }
+    // 予定が無くても「送信済み」として記録し、翌日まで再実行しない
+    await setAppState(env.DB, "last_tomorrow_preview_date", todayKey);
+  } catch {
+    // 失敗時はstate未更新のまま次の分に再試行される
+  }
+}
+
 // カレンダーの「【企業提案】〜様」の予定を検出し、当日締めの
 // 「【企業調べ】〜様」ToDoをGoogle Tasksに自動作成する。毎朝 07:30 (JST) に実行。
 async function runProposalPrepIfDue(env: Env): Promise<void> {
@@ -339,5 +374,6 @@ export default {
     ctx.waitUntil(runReminderCheck(env));
     ctx.waitUntil(runDailyDigestIfDue(env));
     ctx.waitUntil(runProposalPrepIfDue(env));
+    ctx.waitUntil(runTomorrowPreviewIfDue(env));
   },
 };
