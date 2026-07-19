@@ -29,9 +29,12 @@ export interface Env {
   // Google Cloud ConsoleでOAuthクライアント作成後に設定する。
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
-  // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式)。未設定なら "08:00"。
+  // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式のカンマ区切り)。未設定なら DEFAULT_DIGEST_TIMES。
   DAILY_DIGEST_TIME_JST?: string;
 }
+
+const DEFAULT_DIGEST_TIMES = ["06:00", "09:00", "12:00", "15:00", "18:00", "21:00"];
+const TASK_COMMAND = "【タスク】";
 
 const HELP_TEXT = [
   "使えるコマンド:",
@@ -40,8 +43,10 @@ const HELP_TEXT = [
   "  Google連携済みならGoogle Tasksにも追加されます",
   "・一覧  … 未通知のリマインダーを表示",
   "・削除 <ID>  … リマインダーを削除",
-  "・今日  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
+  "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・ヘルプ  … このメッセージを表示",
+  "",
+  `毎日 ${DEFAULT_DIGEST_TIMES.join("/")} (JST) に自動配信されます`,
 ].join("\n");
 
 const app = new Hono<{ Bindings: Env }>();
@@ -167,7 +172,7 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
       .join("\n");
   }
 
-  if (trimmed === "今日") {
+  if (trimmed === "今日" || trimmed === TASK_COMMAND) {
     const accessToken = await getAccessTokenOrNull(env);
     if (!accessToken) {
       return `Googleと連携されていません。以下のURLにブラウザでアクセスして連携してください。\n${baseUrl}/oauth/start`;
@@ -228,16 +233,26 @@ async function runReminderCheck(env: Env): Promise<void> {
   }
 }
 
+function getDigestTimes(env: Env): string[] {
+  const raw = env.DAILY_DIGEST_TIME_JST;
+  if (!raw) return DEFAULT_DIGEST_TIMES;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 async function runDailyDigestIfDue(env: Env): Promise<void> {
   if (!env.ALLOWED_USER_ID) return; // 送信先が確定できない場合は何もしない
 
   const now = new Date();
-  const targetHm = env.DAILY_DIGEST_TIME_JST ?? "08:00";
-  if (currentJstHm(now) !== targetHm) return;
+  const nowHm = currentJstHm(now);
+  if (!getDigestTimes(env).includes(nowHm)) return;
 
-  const todayKey = jstDateKey(now);
-  const lastSentKey = await getAppState(env.DB, "last_digest_sent_date");
-  if (lastSentKey === todayKey) return; // 同じ分の重複実行やcron再試行での二重送信を防ぐ
+  // 「日付+時刻」単位で送信済みかを記録し、同じ時刻枠での二重送信(cron再試行等)を防ぐ
+  const sentKey = `${jstDateKey(now)} ${nowHm}`;
+  const lastSentKey = await getAppState(env.DB, "last_digest_sent_at");
+  if (lastSentKey === sentKey) return;
 
   const accessToken = await getAccessTokenOrNull(env);
   if (!accessToken) return; // 未連携ならダイジェストは送らない
@@ -245,7 +260,7 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
   try {
     const digest = await buildTodayDigest(accessToken);
     await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, env.ALLOWED_USER_ID, digest);
-    await setAppState(env.DB, "last_digest_sent_date", todayKey);
+    await setAppState(env.DB, "last_digest_sent_at", sentKey);
   } catch {
     // 取得失敗時は次の分に自然に再試行される(state未更新のため)
   }

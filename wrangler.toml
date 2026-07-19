@@ -12,5 +12,5 @@ database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 crons = ["* * * * *"]
 
 [vars]
-# 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式。
-DAILY_DIGEST_TIME_JST = "08:00"
+# 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式のカンマ区切りで複数指定可。
+DAILY_DIGEST_TIME_JST = "06:00,09:00,12:00,15:00,18:00,21:00"
