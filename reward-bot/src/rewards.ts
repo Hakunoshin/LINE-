@@ -295,7 +295,10 @@ async function circusLogin(email: string, password: string): Promise<string | nu
 }
 
 /** circus から企業の理論年収(と分かれば報酬)を取得。失敗時は null。 */
-async function fetchCircus(env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string }, companyName: string): Promise<CircusData | null> {
+async function fetchCircus(
+  env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string },
+  companyName: string
+): Promise<CircusData | null> {
   if (!env.CIRCUS_EMAIL || !env.CIRCUS_PASSWORD) return null;
   const token = await circusLogin(env.CIRCUS_EMAIL, env.CIRCUS_PASSWORD);
   if (!token) return null;

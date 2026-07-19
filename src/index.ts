@@ -19,7 +19,6 @@ import {
   insertTask,
 } from "./google";
 import { handleWithAi } from "./ai";
-import { compareReward, formatComparison } from "./rewards";
 
 export interface Env {
   DB: D1Database;
@@ -35,9 +34,6 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式のカンマ区切り)。未設定なら DEFAULT_DIGEST_TIMES。
   DAILY_DIGEST_TIME_JST?: string;
-  // circus 自動ログイン用 (任意)。設定すると成約報酬比較で理論年収を circus から取得しようとする。
-  CIRCUS_EMAIL?: string;
-  CIRCUS_PASSWORD?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -59,8 +55,6 @@ const HELP_TEXT = [
   "・一覧  … 未通知のリマインダーを表示",
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
-  "・報酬 <企業名> [理論年収]  … circus/peterpan/trueaimで成約報酬が一番高い媒体を表示",
-  "  例) 報酬 株式会社レオパレス21 理論年収500万",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -135,25 +129,6 @@ app.post("/webhook", async (c) => {
   return c.text("ok");
 });
 
-// 「株式会社◯◯ 理論年収500万」から企業名と理論年収(万円)を分離する。
-function parseCompanyAndTheory(text: string): { company: string; theoryMan: number | null } {
-  let theoryMan: number | null = null;
-  let company = text;
-  const m = text.match(/(?:理論年収|年収)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*万?/);
-  if (m) {
-    theoryMan = parseFloat(m[1]);
-    company = text.replace(m[0], "");
-  } else {
-    // 「500万」のような単独の年収表記(3桁以上)を末尾補足として扱う
-    const m2 = text.match(/(\d{3,4})\s*万/);
-    if (m2) {
-      theoryMan = parseFloat(m2[1]);
-      company = text.replace(m2[0], "");
-    }
-  }
-  return { company: company.trim(), theoryMan };
-}
-
 async function getAccessTokenOrNull(env: Env): Promise<string | null> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return null;
   try {
@@ -223,23 +198,6 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
   }
 
-  if (trimmed.startsWith("報酬") || trimmed.startsWith("比較")) {
-    const rest = trimmed.replace(/^(報酬|比較)/, "").trim();
-    if (!rest) {
-      return "比較したい企業名を送ってください。\n例) 報酬 株式会社レオパレス21 理論年収500万";
-    }
-    const { company, theoryMan } = parseCompanyAndTheory(rest);
-    if (!company) {
-      return "企業名を読み取れませんでした。\n例) 報酬 株式会社レオパレス21 理論年収500万";
-    }
-    try {
-      const result = await compareReward(env, company, theoryMan);
-      return formatComparison(result);
-    } catch (e) {
-      return `報酬比較に失敗しました: ${(e as Error).message}`;
-    }
-  }
-
   if (trimmed.startsWith("削除")) {
     const idStr = trimmed.replace("削除", "").trim();
     const id = Number(idStr);
@@ -282,7 +240,6 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
         userId,
         googleAccessToken: accessToken,
         buildTodayDigest,
-        rewardEnv: { CIRCUS_EMAIL: env.CIRCUS_EMAIL, CIRCUS_PASSWORD: env.CIRCUS_PASSWORD },
       }, trimmed);
     } catch (e) {
       return `AI応答でエラーが発生しました: ${(e as Error).message}`;

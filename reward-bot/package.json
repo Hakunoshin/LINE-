@@ -1,0 +1,20 @@
+{
+  "name": "reward-compare-line-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "企業の成約報酬をcircus/peterpan/trueaimで比較するLINE bot (Cloudflare Workers)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.90.0"
+  }
+}
