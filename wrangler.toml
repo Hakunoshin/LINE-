@@ -1,0 +1,12 @@
+name = "personal-line-agent"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "personal-line-agent-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# 1分ごとに期限切れリマインダーをチェックしてLINEへプッシュ通知する
+[triggers]
+crons = ["* * * * *"]
