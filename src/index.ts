@@ -141,7 +141,7 @@ async function buildTodayDigest(accessToken: string): Promise<string> {
   lines.push("");
   lines.push("【未完了ToDo】");
   if (tasks.length === 0) {
-    lines.push("なし");
+    lines.push("本日タスクなし");
   } else {
     for (const t of tasks) {
       lines.push(`・${t.title}`);
