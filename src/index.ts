@@ -39,10 +39,15 @@ export interface Env {
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
 const TASK_COMMAND = "【タスク】";
 
-// 企業提案の前日準備タスク自動生成
+// 企業提案の準備タスク自動生成(当日分)
 const PROPOSAL_MARKER = "【企業提案】";
 const RESEARCH_MARKER = "【企業調べ】";
 const PROPOSAL_PREP_TIME_JST = "07:30";
+
+// 面接対策の準備タスク自動生成(前日分)
+const INTERVIEW_MARKER = "【面接対策】";
+const INTERVIEW_PREFIX = "面接対策準備";
+const INTERVIEW_PREP_TIME_JST = "07:30";
 
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
@@ -395,12 +400,54 @@ async function runProposalPrepIfDue(env: Env): Promise<void> {
   }
 }
 
+// 翌日のカレンダーの「【面接対策】〜様」を検出し、当日(=面接の前日)締めの
+// 「面接対策準備〜様」ToDoをGoogle Tasksに自動作成する。毎朝 07:30 (JST) に実行。
+async function runInterviewPrepIfDue(env: Env): Promise<void> {
+  const now = new Date();
+  if (currentJstHm(now) !== INTERVIEW_PREP_TIME_JST) return;
+
+  const todayKey = jstDateKey(now);
+  const lastKey = await getAppState(env.DB, "last_interview_prep_date");
+  if (lastKey === todayKey) return; // その日は処理済み
+
+  const accessToken = await getAccessTokenOrNull(env);
+  if (!accessToken) return; // 未連携なら何もしない
+
+  try {
+    const { startUtcIso, endUtcIso } = jstTomorrowRangeUtc(now);
+    const events = await listTodayEvents(accessToken, startUtcIso, endUtcIso);
+    const interviews = events.filter((ev) => ev.summary.includes(INTERVIEW_MARKER));
+
+    if (interviews.length === 0) {
+      await setAppState(env.DB, "last_interview_prep_date", todayKey);
+      return;
+    }
+
+    // 既存の未完了ToDoと重複しないようにする
+    const existing = await listIncompleteTasks(accessToken);
+    const existingTitles = new Set(existing.map((t) => t.title));
+    const dueToday = jstDateOnlyUtc(now.toISOString()); // 面接の前日(=今日)が締切
+
+    for (const ev of interviews) {
+      const title = ev.summary.replace(INTERVIEW_MARKER, INTERVIEW_PREFIX).trim();
+      if (existingTitles.has(title)) continue;
+      await insertTask(accessToken, title, dueToday);
+      existingTitles.add(title);
+    }
+
+    await setAppState(env.DB, "last_interview_prep_date", todayKey);
+  } catch {
+    // 失敗時はstate未更新のまま次の分に再試行される(作成済み分は重複チェックで回避)
+  }
+}
+
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runReminderCheck(env));
     ctx.waitUntil(runDailyDigestIfDue(env));
     ctx.waitUntil(runProposalPrepIfDue(env));
+    ctx.waitUntil(runInterviewPrepIfDue(env));
     ctx.waitUntil(runTomorrowPreviewIfDue(env));
   },
 };
