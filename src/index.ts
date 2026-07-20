@@ -120,6 +120,10 @@ app.post("/webhook", async (c) => {
       continue;
     }
 
+    // 自動配信(push)の送信先として、メッセージ送信者のuserIdを記録しておく。
+    // ALLOWED_USER_IDが未設定でも、一度でもメッセージを送れば自動配信が有効になる。
+    await setAppState(c.env.DB, "owner_user_id", userId);
+
     const text = event.message.text ?? "";
     const baseUrl = new URL(c.req.url).origin;
     const reply = await handleCommand(c.env, userId, text, baseUrl);
@@ -128,6 +132,12 @@ app.post("/webhook", async (c) => {
 
   return c.text("ok");
 });
+
+// 自動配信(push)の送信先を決める。ALLOWED_USER_ID優先、無ければ記録済みのowner。
+async function getPushTargetUserId(env: Env): Promise<string | null> {
+  if (env.ALLOWED_USER_ID) return env.ALLOWED_USER_ID;
+  return await getAppState(env.DB, "owner_user_id");
+}
 
 async function getAccessTokenOrNull(env: Env): Promise<string | null> {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return null;
@@ -184,6 +194,21 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     return reminders
       .map((r) => `#${r.id} ${formatJstDateTime(r.due_at)} ${r.content}`)
       .join("\n");
+  }
+
+  if (trimmed === "テスト配信" || trimmed === "テスト") {
+    // 自動配信と同じpush送信を今すぐ試す(送信先登録の確認用)
+    const accessToken = await getAccessTokenOrNull(env);
+    if (!accessToken) {
+      return `Googleと連携されていません。\n${baseUrl}/oauth/start から連携してください。`;
+    }
+    try {
+      const digest = await buildTodayDigest(accessToken);
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, userId, digest);
+      return "テスト配信をプッシュ送信しました。この直後に届く別メッセージが自動配信と同じ形式です。";
+    } catch (e) {
+      return `テスト配信に失敗しました: ${(e as Error).message}`;
+    }
   }
 
   if (trimmed === "今日" || trimmed === TASK_COMMAND) {
@@ -272,11 +297,12 @@ function getDigestTimes(env: Env): string[] {
 }
 
 async function runDailyDigestIfDue(env: Env): Promise<void> {
-  if (!env.ALLOWED_USER_ID) return; // 送信先が確定できない場合は何もしない
-
   const now = new Date();
   const nowHm = currentJstHm(now);
   if (!getDigestTimes(env).includes(nowHm)) return;
+
+  const target = await getPushTargetUserId(env);
+  if (!target) return; // 送信先が未登録(誰もメッセージを送っていない)なら何もしない
 
   // 「日付+時刻」単位で送信済みかを記録し、同じ時刻枠での二重送信(cron再試行等)を防ぐ
   const sentKey = `${jstDateKey(now)} ${nowHm}`;
@@ -288,7 +314,7 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
 
   try {
     const digest = await buildTodayDigest(accessToken);
-    await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, env.ALLOWED_USER_ID, digest);
+    await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, digest);
     await setAppState(env.DB, "last_digest_sent_at", sentKey);
   } catch {
     // 取得失敗時は次の分に自然に再試行される(state未更新のため)
@@ -297,10 +323,11 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
 
 // 翌日の予定を前日夜(既定21:00 JST)にまとめてLINE予告する。予定が無い日は送らない。
 async function runTomorrowPreviewIfDue(env: Env): Promise<void> {
-  if (!env.ALLOWED_USER_ID) return;
-
   const now = new Date();
   if (currentJstHm(now) !== TOMORROW_PREVIEW_TIME_JST) return;
+
+  const target = await getPushTargetUserId(env);
+  if (!target) return;
 
   const todayKey = jstDateKey(now);
   const lastKey = await getAppState(env.DB, "last_tomorrow_preview_date");
@@ -318,7 +345,7 @@ async function runTomorrowPreviewIfDue(env: Env): Promise<void> {
         const time = ev.isAllDay ? "終日" : formatJstDateTime(ev.startIso).split(" ")[1];
         lines.push(`・${time} ${ev.summary}`);
       }
-      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, env.ALLOWED_USER_ID, lines.join("\n"));
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, lines.join("\n"));
     }
     // 予定が無くても「送信済み」として記録し、翌日まで再実行しない
     await setAppState(env.DB, "last_tomorrow_preview_date", todayKey);
