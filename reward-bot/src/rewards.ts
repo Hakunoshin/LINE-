@@ -266,20 +266,34 @@ async function fetchPeterpanSheet(): Promise<RewardSource[]> {
   return out;
 }
 
-// ---- circus ログインAPI (任意・要認証情報) ------------------------------
+// ---- circus ログインAPI (要 CIRCUS_EMAIL / CIRCUS_PASSWORD) --------------
 //
-// 注意: circus の内部APIはSPAのバンドルから推定したもので、公式仕様ではない。
-// エンドポイント名(login-v2 / get-job-search-v2)・認証ヘッダ
-// (x-circus-authentication-token) は判明しているが、レスポンスの
-// フィールド名(理論年収)は実アカウントでの確認が必要。取得できないときは
-// null を返し、理論年収は手入力にフォールバックする。
+// circus の内部API (SPAバンドルから判明):
+//   - POST login-v2          : { email, password } でログイン → token
+//   - GET  get-job-search-v2 : qJson=[{option,keyword,logicType}] で求人検索
+//   認証は header "x-circus-authentication-token: <token>" + セッションcookie。
+// 求人オブジェクトの主なフィールド:
+//   - theoreticalAnnualIncome : 理論年収 (円 or 万円)
+//   - commissionFee           : { commissionFeePrice(固定額), commissionFeePercentage(料率) }
+//   - company                 : { name }
+// 認証情報が未設定/失敗時は null を返し、理論年収は手入力にフォールバックする。
 
 export interface CircusData {
   theoryIncomeMan: number | null;
-  rewardRaw: string | null;
+  rewardRaw: string | null; // circus自身の成果報酬 (固定額 or 「理論年収の◯%」)
 }
 
-async function circusLogin(email: string, password: string): Promise<string | null> {
+interface CircusAuth {
+  token: string;
+  cookie: string;
+}
+
+function extractCookieValue(cookieHeader: string, name: string): string | null {
+  const m = cookieHeader.match(new RegExp(`${name}=([^;]+)`));
+  return m ? m[1] : null;
+}
+
+async function circusLogin(email: string, password: string): Promise<CircusAuth | null> {
   try {
     const res = await fetch(`${CIRCUS_API}/login-v2`, {
       method: "POST",
@@ -287,57 +301,111 @@ async function circusLogin(email: string, password: string): Promise<string | nu
       body: JSON.stringify({ email, password, isAdmin: false }),
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as any;
-    return data?.token ?? data?.data?.token ?? null;
+    const getSetCookie = (res.headers as { getSetCookie?: () => string[] }).getSetCookie;
+    const cookie = getSetCookie ? getSetCookie.call(res.headers).join("; ") : res.headers.get("set-cookie") ?? "";
+    const data = (await res.json().catch(() => ({}))) as any;
+    const token =
+      data?.token ??
+      data?.data?.token ??
+      data?.session?.token ??
+      extractCookieValue(cookie, "circus-session-token");
+    if (!token) return null;
+    return { token: String(token), cookie };
   } catch {
     return null;
   }
 }
 
-/** circus から企業の理論年収(と分かれば報酬)を取得。失敗時は null。 */
+/** get-job-search-v2 を企業名キーワードで叩き、求人らしきノードを収集する。 */
+async function circusSearchJobs(auth: CircusAuth, companyName: string): Promise<any[]> {
+  const qJson = JSON.stringify([{ option: 1, keyword: companyName, logicType: "and" }]);
+  const url = new URL(`${CIRCUS_API}/get-job-search-v2`);
+  url.searchParams.set("qJson", qJson);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("orderBy", "recommendScore");
+  url.searchParams.set("order", "desc");
+  const res = await fetch(url.toString(), {
+    headers: {
+      "x-circus-authentication-token": auth.token,
+      ...(auth.cookie ? { cookie: auth.cookie } : {}),
+    },
+  });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => null);
+  return collectJobNodes(data);
+}
+
+/** レスポンスを再帰的に走査し、company を持ち理論年収/報酬フィールドを持つノードを求人とみなす。 */
+function collectJobNodes(data: any): any[] {
+  const out: any[] = [];
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const v of node) visit(v);
+      return;
+    }
+    if (node.company && ("theoreticalAnnualIncome" in node || "commissionFee" in node)) {
+      out.push(node);
+    }
+    for (const v of Object.values(node)) visit(v);
+  };
+  visit(data);
+  return out;
+}
+
+function circusCompanyName(job: any): string {
+  const c = job?.company;
+  if (!c) return "";
+  return typeof c === "object" ? String(c.name ?? c.companyName ?? "") : String(c);
+}
+
+/** 円 or 万円で来る金額を万円に正規化する (5,000,000 → 500 / 500 → 500)。 */
+function toMan(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n >= 10000 ? Math.round(n / 10000) : n;
+}
+
+function circusTheoryMan(job: any): number | null {
+  const t = job?.theoreticalAnnualIncome;
+  if (t == null) return null;
+  if (typeof t === "object") {
+    return toMan(t.to ?? t.max ?? t.value ?? t.from ?? t.min);
+  }
+  return toMan(t);
+}
+
+function circusRewardRaw(job: any): string | null {
+  const cf = job?.commissionFee;
+  if (!cf || typeof cf !== "object") return null;
+  const priceMan = toMan(cf.commissionFeePrice);
+  const pct = Number(cf.commissionFeePercentage);
+  if (priceMan) return `${priceMan}万円`;
+  if (Number.isFinite(pct) && pct > 0) return `理論年収の${pct}%`;
+  return null;
+}
+
+/** circus から企業の理論年収と成果報酬を取得。失敗時は null。 */
 async function fetchCircus(
   env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string },
   companyName: string
 ): Promise<CircusData | null> {
   if (!env.CIRCUS_EMAIL || !env.CIRCUS_PASSWORD) return null;
-  const token = await circusLogin(env.CIRCUS_EMAIL, env.CIRCUS_PASSWORD);
-  if (!token) return null;
+  const auth = await circusLogin(env.CIRCUS_EMAIL, env.CIRCUS_PASSWORD);
+  if (!auth) return null;
   try {
-    const url = new URL(`${CIRCUS_API}/get-job-search-v2`);
-    url.searchParams.set("keyword", companyName);
-    const res = await fetch(url.toString(), {
-      headers: { "x-circus-authentication-token": token },
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as any;
-    // レスポンス構造は要確認。理論年収らしき数値を緩く探索する。
-    const income = extractTheoryIncome(data);
-    return { theoryIncomeMan: income, rewardRaw: null };
+    const jobs = await circusSearchJobs(auth, companyName);
+    if (jobs.length === 0) return { theoryIncomeMan: null, rewardRaw: null };
+    const target = normalizeCompany(companyName);
+    const job =
+      jobs.find((j) => {
+        const n = normalizeCompany(circusCompanyName(j));
+        return n && (n === target || n.includes(target) || target.includes(n));
+      }) ?? jobs[0];
+    return { theoryIncomeMan: circusTheoryMan(job), rewardRaw: circusRewardRaw(job) };
   } catch {
     return null;
   }
-}
-
-/** circusレスポンスから理論年収(万円)らしき値を緩く探す (フィールド名が不確実なため)。 */
-function extractTheoryIncome(data: unknown): number | null {
-  let found: number | null = null;
-  const visit = (node: any, keyHint: string) => {
-    if (found != null || node == null) return;
-    if (typeof node === "number") {
-      if (/理論年収|theor|annualIncome|expectedIncome|income/i.test(keyHint) && node > 100) {
-        // 円単位で来る場合は万円に換算
-        found = node >= 1_000_000 ? Math.round(node / 10_000) : node;
-      }
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const v of node) visit(v, keyHint);
-    } else if (typeof node === "object") {
-      for (const [k, v] of Object.entries(node)) visit(v, k);
-    }
-  };
-  visit(data, "");
-  return found;
 }
 
 // ---- 比較本体 ----------------------------------------------------------
@@ -389,12 +457,13 @@ export async function compareReward(
     return { platform, company: src.company, rewardRaw: src.rewardRaw, bestYenMan: yen, note };
   };
 
-  results.push(build("circus", null)); // circusの報酬額は現状取得しないためプレースホルダ
-  // circusの理論年収だけ取れたことは theorySource に反映済み。
+  const circusSrc: RewardSource | null = circus?.rewardRaw
+    ? { platform: "circus", company: companyName, rewardRaw: circus.rewardRaw }
+    : null;
+  results.push(build("circus", circusSrc));
   results.push(build("peterpan", matchCompany(peterpanSources, companyName)));
   results.push(build("trueaim", matchCompany(trueaim, companyName)));
 
-  // circus の報酬は未対応なので、円が取れない circus は末尾扱い。
   results.sort((a, b) => {
     if (a.bestYenMan == null && b.bestYenMan == null) return 0;
     if (a.bestYenMan == null) return 1;
