@@ -38,7 +38,7 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 [circus](https://circus-job.com/) の求人一覧を定期的に取得し、新着求人を [Threads](https://www.threads.net/) へ自動投稿します。
 
-- 毎日決まったJST時刻（デフォルト `10:00`、`THREADS_AUTOPOST_TIME_JST` で変更可）に、circusの新着求人を1件ずつThreadsへ投稿
+- 毎日決まったJST時刻（デフォルト `09:00,15:00,21:00` の1日3回、`THREADS_AUTOPOST_TIME_JST` にカンマ区切りで指定して変更可）に、circusの新着求人を1件ずつThreadsへ投稿
 - 1回の実行で投稿する件数は `THREADS_MAX_POSTS_PER_RUN`（デフォルト `1`）で調整。過去に投稿した求人はD1に記録され、二度と投稿されません
 - 投稿できた求人はLINEのオーナー宛にも通知されます
 - LINEで `求人投稿` と送ると、その場で新着求人を取得して投稿できます（動作確認用）
@@ -48,14 +48,22 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 必要な設定（すべて揃わないと自動投稿は動きません）:
 
 ```bash
-# circusの求人一覧を返すJSONエンドポイント
+# circusの求人一覧を返すエンドポイント
 npx wrangler secret put CIRCUS_JOBS_URL
-# circus APIのBearerトークン（認証が必要な場合のみ）
-npx wrangler secret put CIRCUS_API_TOKEN
+# circusへのログイン（メール+パスワード）。ログインで得たセッションで求人を取得します
+npx wrangler secret put CIRCUS_LOGIN_URL
+npx wrangler secret put CIRCUS_EMAIL
+npx wrangler secret put CIRCUS_PASSWORD
+# （ログインではなく静的なBearerトークンを直接持っている場合はこちらだけでも可）
+# npx wrangler secret put CIRCUS_API_TOKEN
 # ThreadsのUser IDと長期アクセストークン（threads_basic / threads_content_publish 権限）
 npx wrangler secret put THREADS_USER_ID
 npx wrangler secret put THREADS_ACCESS_TOKEN
 ```
+
+circusへのログインは、デフォルトで `CIRCUS_LOGIN_URL` に `{ "email": ..., "password": ... }` をJSONでPOSTし、
+レスポンスのSet-Cookie（セッション）またはJSON中のトークンを次のリクエストに引き継ぎます。
+circus側のログインAPIの仕様（フィールド名・レスポンス形式）によっては `src/circus.ts` の `circusLogin` の調整が必要です。
 
 circusのレスポンスは配列でも `{ "jobs": [...] }` / `{ "data": [...] }` / `{ "results": [...] }` のいずれでも受け付け、
 `title`/`job_title`、`company`/`company_name` などフィールド名の揺れも吸収します。

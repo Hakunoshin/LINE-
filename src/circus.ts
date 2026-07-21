@@ -89,10 +89,83 @@ export function formatCircusJobPost(job: CircusJob): string {
   return lines.join("\n");
 }
 
-/** circusのエンドポイントから求人一覧を取得して正規化する。 */
-export async function fetchCircusJobs(url: string, apiToken?: string): Promise<CircusJob[]> {
+// ログイン後に得られる認証情報。Cookieセッション or Bearerトークンのどちらか(両方でも可)。
+export interface CircusAuth {
+  cookie?: string;
+  bearer?: string;
+}
+
+function pickToken(data: Record<string, unknown>): string | undefined {
+  for (const key of ["token", "access_token", "accessToken", "jwt", "id_token", "authToken"]) {
+    const v = data[key];
+    if (typeof v === "string" && v) return v;
+  }
+  // { data: { token } } のようにネストしている場合も1段だけ探索する
+  const nested = data.data;
+  if (nested && typeof nested === "object") return pickToken(nested as Record<string, unknown>);
+  return undefined;
+}
+
+/**
+ * circusにメールアドレス+パスワードでログインし、以降のリクエストに使う認証情報を返す。
+ * レスポンスがSet-Cookie(セッション)でもJSON中のトークンでも受け取れるようにしている。
+ *
+ * NOTE: circusの実際のログインAPIの仕様(リクエストのフィールド名・レスポンス形式)に合わせて
+ * 調整が必要になる場合があります。既定ではJSON {email, password} をPOSTします。
+ */
+export async function circusLogin(loginUrl: string, email: string, password: string): Promise<CircusAuth> {
+  const res = await fetch(loginUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ email, password }),
+    redirect: "manual",
+  });
+
+  if (res.status >= 400) {
+    throw new Error(`circus login failed: ${res.status} ${await res.text()}`);
+  }
+
+  const auth: CircusAuth = {};
+
+  // Set-Cookieからセッションクッキーを拾う。複数CookieはgetSetCookie()で取得できる環境を優先。
+  const getSetCookie = (res.headers as { getSetCookie?: () => string[] }).getSetCookie;
+  const rawSetCookie = res.headers.get("set-cookie");
+  const setCookies: string[] =
+    typeof getSetCookie === "function"
+      ? getSetCookie.call(res.headers)
+      : rawSetCookie
+        ? [rawSetCookie]
+        : [];
+  const cookiePairs = setCookies
+    .map((c: string) => c.split(";")[0].trim())
+    .filter(Boolean);
+  if (cookiePairs.length > 0) auth.cookie = cookiePairs.join("; ");
+
+  // JSONボディにトークンがあれば拾う(ボディは一度しか読めないのでtextで受けてからparse)
+  const bodyText = await res.text();
+  if (bodyText) {
+    try {
+      const data = JSON.parse(bodyText) as Record<string, unknown>;
+      const token = pickToken(data);
+      if (token) auth.bearer = token;
+    } catch {
+      // JSONでなければトークンは無い(Cookie方式)とみなす
+    }
+  }
+
+  if (!auth.cookie && !auth.bearer) {
+    throw new Error(
+      "circusログインでセッション情報(Cookie/トークン)を取得できませんでした。ログインAPIのレスポンス形式の確認が必要です。"
+    );
+  }
+  return auth;
+}
+
+/** circusのエンドポイントから求人一覧を取得して正規化する。認証はBearer/Cookieのどちらでも可。 */
+export async function fetchCircusJobs(url: string, auth?: CircusAuth): Promise<CircusJob[]> {
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+  if (auth?.bearer) headers.Authorization = `Bearer ${auth.bearer}`;
+  if (auth?.cookie) headers.Cookie = auth.cookie;
 
   const res = await fetch(url, { headers });
   if (!res.ok) {

@@ -21,7 +21,7 @@ import {
   insertTask,
 } from "./google";
 import { handleWithAi } from "./ai";
-import { fetchCircusJobs, formatCircusJobPost, type CircusJob } from "./circus";
+import { circusLogin, fetchCircusJobs, formatCircusJobPost, type CircusJob } from "./circus";
 import { postThreadsText } from "./threads";
 
 export interface Env {
@@ -41,12 +41,17 @@ export interface Env {
   // --- circus求人 → Threads自動投稿 ---
   // circusの求人一覧を返すJSONエンドポイント。未設定なら自動投稿は動かない。
   CIRCUS_JOBS_URL?: string;
-  // circus APIのBearerトークン(任意)。
+  // circusにログインするためのエンドポイントURLと認証情報(secret)。
+  // これらを設定すると、求人取得前に自動ログインしてセッションを使う。
+  CIRCUS_LOGIN_URL?: string;
+  CIRCUS_EMAIL?: string;
+  CIRCUS_PASSWORD?: string;
+  // 静的なBearerトークンを直接持っている場合はこちら(ログイン不要になる)。
   CIRCUS_API_TOKEN?: string;
   // ThreadsのUser ID と長期アクセストークン。両方揃わないと投稿しない。
   THREADS_USER_ID?: string;
   THREADS_ACCESS_TOKEN?: string;
-  // 自動投稿を実行するJSTの時刻 ("HH:MM")。未設定なら DEFAULT_THREADS_AUTOPOST_TIME。
+  // 自動投稿を実行するJSTの時刻 ("HH:MM"のカンマ区切り)。未設定なら DEFAULT_THREADS_AUTOPOST_TIMES。
   THREADS_AUTOPOST_TIME_JST?: string;
   // 1回の実行で投稿する求人の最大件数。未設定なら DEFAULT_THREADS_MAX_POSTS。
   THREADS_MAX_POSTS_PER_RUN?: string;
@@ -68,8 +73,8 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
-// circus求人 → Threads自動投稿
-const DEFAULT_THREADS_AUTOPOST_TIME = "10:00";
+// circus求人 → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回。
+const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
 const DEFAULT_THREADS_MAX_POSTS = 1;
 const THREADS_POST_COMMAND = "求人投稿";
 
@@ -485,16 +490,26 @@ async function runInterviewPrepIfDue(env: Env): Promise<void> {
 }
 
 // circus/Threadsの必須設定が揃っているか確認する。
+// circus側は「ログイン情報(URL+メール+パスワード)」または「静的トークン」のどちらかが必要。
 function getThreadsConfig(env: Env): {
   circusUrl: string;
+  circusLogin?: { loginUrl: string; email: string; password: string };
   circusToken?: string;
   threadsUserId: string;
   threadsToken: string;
 } | null {
   const { CIRCUS_JOBS_URL, THREADS_USER_ID, THREADS_ACCESS_TOKEN } = env;
   if (!CIRCUS_JOBS_URL || !THREADS_USER_ID || !THREADS_ACCESS_TOKEN) return null;
+
+  const hasLogin = !!(env.CIRCUS_LOGIN_URL && env.CIRCUS_EMAIL && env.CIRCUS_PASSWORD);
+  // ログイン情報も静的トークンも無ければ求人を取得できない
+  if (!hasLogin && !env.CIRCUS_API_TOKEN) return null;
+
   return {
     circusUrl: CIRCUS_JOBS_URL,
+    circusLogin: hasLogin
+      ? { loginUrl: env.CIRCUS_LOGIN_URL!, email: env.CIRCUS_EMAIL!, password: env.CIRCUS_PASSWORD! }
+      : undefined,
     circusToken: env.CIRCUS_API_TOKEN,
     threadsUserId: THREADS_USER_ID,
     threadsToken: THREADS_ACCESS_TOKEN,
@@ -518,7 +533,11 @@ async function postNewCircusJobsToThreads(env: Env, maxPosts: number): Promise<T
 
   let jobs: CircusJob[];
   try {
-    jobs = await fetchCircusJobs(config.circusUrl, config.circusToken);
+    // ログイン情報があれば先にログインしてセッションを得る。無ければ静的トークンを使う。
+    const auth = config.circusLogin
+      ? await circusLogin(config.circusLogin.loginUrl, config.circusLogin.email, config.circusLogin.password)
+      : { bearer: config.circusToken };
+    jobs = await fetchCircusJobs(config.circusUrl, auth);
   } catch (e) {
     return { posted: [], skipped: 0, fetched: 0, error: `求人取得に失敗: ${(e as Error).message}` };
   }
@@ -558,23 +577,33 @@ function getThreadsMaxPosts(env: Env): number {
   return Math.floor(raw);
 }
 
-// circusの新着求人をThreadsへ自動投稿する。既定10:00 (JST) に1日1回実行。
+function getThreadsAutopostTimes(env: Env): string[] {
+  const raw = env.THREADS_AUTOPOST_TIME_JST;
+  if (!raw) return DEFAULT_THREADS_AUTOPOST_TIMES;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// circusの新着求人をThreadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
 async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
   const now = new Date();
-  const targetTime = env.THREADS_AUTOPOST_TIME_JST || DEFAULT_THREADS_AUTOPOST_TIME;
-  if (currentJstHm(now) !== targetTime) return;
+  const nowHm = currentJstHm(now);
+  if (!getThreadsAutopostTimes(env).includes(nowHm)) return;
   if (!getThreadsConfig(env)) return; // 未設定なら何もしない
 
-  const todayKey = jstDateKey(now);
-  const lastKey = await getAppState(env.DB, "last_threads_autopost_date");
-  if (lastKey === todayKey) return; // その日は処理済み
+  // 「日付+時刻」単位で送信済みを記録し、同じ時刻枠での二重投稿(cron再試行等)を防ぐ。
+  const slotKey = `${jstDateKey(now)} ${nowHm}`;
+  const lastKey = await getAppState(env.DB, "last_threads_autopost_slot");
+  if (lastKey === slotKey) return; // その時刻枠は処理済み
 
   const result = await postNewCircusJobsToThreads(env, getThreadsMaxPosts(env));
   if (result.error && result.posted.length === 0) {
     // 取得/投稿が完全に失敗したときはstateを更新せず、次の分に再試行させる。
     return;
   }
-  await setAppState(env.DB, "last_threads_autopost_date", todayKey);
+  await setAppState(env.DB, "last_threads_autopost_slot", slotKey);
 
   // 投稿結果をオーナーにLINEで通知する(送信先が登録済みのときのみ)。
   const target = await getPushTargetUserId(env);

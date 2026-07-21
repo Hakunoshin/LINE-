@@ -15,7 +15,8 @@ crons = ["* * * * *"]
 # 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式のカンマ区切りで複数指定可。
 DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
 
-# circus求人 → Threads自動投稿の実行時刻(JST)と1回あたりの投稿件数。
-# CIRCUS_JOBS_URL / THREADS_USER_ID / THREADS_ACCESS_TOKEN はsecretで設定する。
-THREADS_AUTOPOST_TIME_JST = "10:00"
+# circus求人 → Threads自動投稿の実行時刻(JST, カンマ区切り)と1回あたりの投稿件数。
+# CIRCUS_JOBS_URL / CIRCUS_LOGIN_URL / CIRCUS_EMAIL / CIRCUS_PASSWORD /
+# THREADS_USER_ID / THREADS_ACCESS_TOKEN はsecretで設定する。
+THREADS_AUTOPOST_TIME_JST = "09:00,15:00,21:00"
 THREADS_MAX_POSTS_PER_RUN = "1"
