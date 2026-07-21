@@ -112,6 +112,65 @@ export async function markJobPosted(
     .run();
 }
 
+// --- 求人票プール(手動登録、毎日ランダム投稿の元ネタ) ---
+
+export interface JobPoolItem {
+  id: number;
+  label: string;
+  content: string;
+  active: number;
+  created_at: string;
+}
+
+export async function addJobToPool(db: D1Database, label: string, content: string): Promise<number> {
+  const result = await db
+    .prepare("INSERT INTO job_pool (label, content) VALUES (?, ?)")
+    .bind(label, content)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+export async function listActiveJobPool(db: D1Database): Promise<JobPoolItem[]> {
+  const result = await db
+    .prepare("SELECT * FROM job_pool WHERE active = 1 ORDER BY id ASC")
+    .all<JobPoolItem>();
+  return result.results ?? [];
+}
+
+export async function countActiveJobPool(db: D1Database): Promise<number> {
+  const result = await db
+    .prepare("SELECT COUNT(*) AS n FROM job_pool WHERE active = 1")
+    .first<{ n: number }>();
+  return result?.n ?? 0;
+}
+
+// 有効な求人からランダムに1件返す。直前に投稿したものは(他に候補があれば)避ける。
+export async function getRandomActiveJob(
+  db: D1Database,
+  excludeId?: number
+): Promise<JobPoolItem | null> {
+  if (excludeId != null) {
+    const other = await db
+      .prepare("SELECT * FROM job_pool WHERE active = 1 AND id != ? ORDER BY RANDOM() LIMIT 1")
+      .bind(excludeId)
+      .first<JobPoolItem>();
+    if (other) return other;
+  }
+  const result = await db
+    .prepare("SELECT * FROM job_pool WHERE active = 1 ORDER BY RANDOM() LIMIT 1")
+    .first<JobPoolItem>();
+  return result ?? null;
+}
+
+// 論理削除(投稿対象から外す)。存在すれば true。
+export async function deactivateJobFromPool(db: D1Database, id: number): Promise<boolean> {
+  const result = await db
+    .prepare("UPDATE job_pool SET active = 0 WHERE id = ? AND active = 1")
+    .bind(id)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 // --- Threads OAuthトークン(1行固定) ---
 
 export interface ThreadsTokens {

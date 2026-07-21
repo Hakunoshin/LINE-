@@ -2,50 +2,45 @@
 // 過去投稿のエンゲージメント指標から「何が伸びるか」を分析して次に活かすモジュール。
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { CircusJob } from "./circus";
 import type { PostMetric } from "./db";
-import { THREADS_TEXT_LIMIT } from "./threads";
+import { THREADS_TEXT_LIMIT, truncateForThreads } from "./threads";
 
 function client(apiKey: string): Anthropic {
   return new Anthropic({ apiKey });
 }
 
+// APIキーが無い/生成に失敗したときの簡易フォールバック。求人票の本文をそのまま丸めて使う。
+export function formatRawJobPost(jobText: string): string {
+  const trimmed = jobText.trim();
+  const withTags = `${trimmed}\n\n#求人 #転職 #キャリア`;
+  // ハッシュタグを付けて上限を超えるなら、本文だけで丸める。
+  return withTags.length <= THREADS_TEXT_LIMIT ? withTags : truncateForThreads(trimmed);
+}
+
 /**
- * 求人1件をThreads投稿文に変換する。
+ * 求人票(自由記述の本文)をThreads投稿文に変換する。
  * learnings(過去分析から得た「伸びる型」のメモ)があればそれを反映する。
- * 失敗時は呼び出し側でテンプレートにフォールバックする想定。
+ * 失敗時は呼び出し側で formatRawJobPost にフォールバックする想定。
  */
-export async function generateThreadsPost(
+export async function generateThreadsPostFromText(
   apiKey: string,
-  job: CircusJob,
+  jobText: string,
   learnings: string | null
 ): Promise<string> {
-  const jobLines = [
-    `職種/タイトル: ${job.title}`,
-    job.company && `企業: ${job.company}`,
-    job.location && `勤務地: ${job.location}`,
-    job.salary && `給与/年収: ${job.salary}`,
-    job.employmentType && `雇用形態: ${job.employmentType}`,
-    job.description && `詳細: ${job.description}`,
-    job.url && `応募URL: ${job.url}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
   const system = [
     "あなたはThreadsで求人情報を発信する、SNS運用のプロの編集者です。",
-    "与えられた求人1件を、Threadsで反応(閲覧・いいね・返信・リポスト)が伸びる投稿文にしてください。",
+    "与えられた求人票1件を、Threadsで反応(閲覧・いいね・返信・リポスト)が伸びる投稿文にしてください。",
     "",
     "制約:",
     `- 全体で${THREADS_TEXT_LIMIT}文字以内。日本語。プレーンテキスト(Markdown記法は使わない)。`,
     "- 冒頭1行で目を引くフック。改行と絵文字は適度に使い、読みやすく。",
-    "- 求人事実の誇張・捏造は禁止。与えられた情報の範囲で書く。",
-    "- 応募URLがあれば本文中にそのまま含める。",
+    "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
+    "- 求人票中にURLがあれば本文にそのまま含める。",
     "- 末尾に関連ハッシュタグを3〜5個。",
     "- 出力は投稿本文のみ。前置き・説明・コードブロックは不要。",
   ].join("\n");
 
-  const userParts = [`# 求人情報\n${jobLines}`];
+  const userParts = [`# 求人票\n${jobText.trim()}`];
   if (learnings && learnings.trim()) {
     userParts.push(
       `# これまでの分析(伸びた投稿の傾向。可能な範囲で反映すること)\n${learnings.trim()}`

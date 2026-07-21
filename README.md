@@ -34,15 +34,15 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 カレンダーは読み取りのみ、ToDoはGoogle Tasksとの読み書きです（カレンダーへの書き込みは行いません）。
 
-### circus求人のThreads自動投稿（任意）
+### 求人票のThreads自動投稿（任意）
 
-[circus](https://circus-job.com/) の求人一覧を定期的に取得し、新着求人を [Threads](https://www.threads.net/) へ自動投稿します。
+LINEで登録した求人票のプールから、毎日ランダムに1件を選んで [Threads](https://www.threads.net/) へ自動投稿します。
 
-- 毎日決まったJST時刻（デフォルト `09:00,15:00,21:00` の1日3回、`THREADS_AUTOPOST_TIME_JST` にカンマ区切りで指定して変更可）に、circusの新着求人を1件ずつThreadsへ投稿
-- 1回の実行で投稿する件数は `THREADS_MAX_POSTS_PER_RUN`（デフォルト `1`）で調整。過去に投稿した求人はD1に記録され、二度と投稿されません
-- **投稿文はClaudeが生成**（`ANTHROPIC_API_KEY` 設定時）。後述の分析結果を踏まえて「伸びる型」に寄せて作文します。未設定時は定型テンプレートで投稿します
+- **求人票はLINEから登録**: `求人追加 <求人票の本文>` でプールに追加。`求人リスト` で一覧、`求人削除 <ID>` で削除
+- 毎日決まったJST時刻（デフォルト `09:00,15:00,21:00` の1日3回、`THREADS_AUTOPOST_TIME_JST` にカンマ区切りで指定して変更可）に、プールからランダムに1件投稿（直前と同じ求人は避けます）
+- **投稿文はClaudeが生成**（`ANTHROPIC_API_KEY` 設定時）。後述の分析結果を踏まえて「伸びる型」に寄せて作文します。未設定時は求人票本文をそのまま整形して投稿します
 - **投稿するたびに、LINEの秘書から「この求人をThreadsに投稿しました🧵」と投稿本文つきで通知**が届きます
-- LINEで `求人投稿` と送ると、その場で新着求人を取得して投稿できます（動作確認用）
+- LINEで `求人投稿` と送ると、その場でプールから1件投稿できます（動作確認用）
 
 #### パフォーマンス分析→改善ループ
 
@@ -50,19 +50,6 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 上位の投稿をClaudeが分析し、「どんな投稿が伸びるか」の改善メモを更新。次回以降の投稿生成にそのメモを渡すことで、投稿が継続的に改善されていきます。
 
 #### 設定
-
-circus（求人取得）:
-
-```bash
-# circusの求人一覧を返すエンドポイント
-npx wrangler secret put CIRCUS_JOBS_URL
-# circusへのログイン（メール+パスワード）。ログインで得たセッションで求人を取得します
-npx wrangler secret put CIRCUS_LOGIN_URL
-npx wrangler secret put CIRCUS_EMAIL
-npx wrangler secret put CIRCUS_PASSWORD
-# （ログインではなく静的なBearerトークンを直接持っている場合はこれだけでも可）
-# npx wrangler secret put CIRCUS_API_TOKEN
-```
 
 Threads（投稿先）— OAuthアプリを登録するとトークンは自動で更新され、手動更新は不要になります:
 
@@ -84,13 +71,7 @@ npx wrangler secret put THREADS_APP_SECRET   # Threads App Secret
 
 > 手動発行した長期トークンを直接使う場合は、代わりに `THREADS_USER_ID` と `THREADS_ACCESS_TOKEN` を secret に設定します（この場合、自動refreshは行われないため60日ごとに手動更新が必要です）。
 
-circusへのログインは、デフォルトで `CIRCUS_LOGIN_URL` に `{ "email": ..., "password": ... }` をJSONでPOSTし、
-レスポンスのSet-Cookie（セッション）またはJSON中のトークンを次のリクエストに引き継ぎます。
-circus側のログインAPIの仕様（フィールド名・レスポンス形式）によっては `src/circus.ts` の `circusLogin` の調整が必要です。
-
-circusのレスポンスは配列でも `{ "jobs": [...] }` / `{ "data": [...] }` / `{ "results": [...] }` のいずれでも受け付け、
-`title`/`job_title`、`company`/`company_name` などフィールド名の揺れも吸収します。
-投稿時刻や1回あたりの件数は `wrangler.toml` の `[vars]`（`THREADS_AUTOPOST_TIME_JST`, `THREADS_MAX_POSTS_PER_RUN`）でも指定できます。
+> `src/circus.ts` はcircusから求人を取得する実装ですが、現在の自動投稿フローでは使用していません（将来circus連携する場合の土台として残しています）。
 
 ### AI応答（任意）
 
@@ -204,15 +185,16 @@ src/
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  circus.ts              circusログイン・求人取得・正規化・投稿文テンプレート
   threads.ts             Threads Graph API(投稿・OAuth・トークンrefresh・インサイト)
   threadsContent.ts      Claudeによる投稿文生成とパフォーマンス分析
-  db.ts                  D1へのリマインダー・トークン・会話履歴・投稿済み求人・投稿指標のCRUD
+  circus.ts              circus求人取得(現在の自動投稿フローでは未使用。将来用に保持)
+  db.ts                  D1へのリマインダー・トークン・会話履歴・求人プール・投稿指標のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
-  0004_threads_posted_jobs.sql threads_posted_jobsテーブルのスキーマ
+  0004_threads_posted_jobs.sql threads_posted_jobsテーブルのスキーマ(circus用・未使用)
   0005_threads_oauth_and_metrics.sql  threads_tokens / threads_post_metricsテーブルのスキーマ
+  0006_job_pool.sql      job_pool(求人票プール)テーブルのスキーマ
 ```
