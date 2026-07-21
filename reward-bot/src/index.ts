@@ -28,6 +28,8 @@ const HELP_TEXT = [
   "・企業名はできるだけフルネームで。",
   "・料率型(理論年収×◯%)を金額換算するには理論年収が必要です。",
   "  「理論年収500万」または「500万」を付けて送ってください。",
+  "・circusの求人URL(例 https://circus-job.com/jobs/20000)を一緒に送ると、",
+  "  理論年収をcircusから自動取得します。",
 ].join("\n");
 
 const app = new Hono<{ Bindings: Env }>();
@@ -43,8 +45,14 @@ app.get("/api/compare", async (c) => {
   }
   const theoryRaw = c.req.query("theory");
   const theoryMan = theoryRaw != null && theoryRaw !== "" ? Number(theoryRaw) : null;
+  const circusJobId = parseCircusJobId(c.req.query("circusJob") ?? "");
   try {
-    const result = await compareReward(c.env, company, Number.isFinite(theoryMan as number) ? theoryMan : null);
+    const result = await compareReward(
+      c.env,
+      company,
+      Number.isFinite(theoryMan as number) ? theoryMan : null,
+      circusJobId
+    );
     return c.json(result);
   } catch (e) {
     return c.json({ error: (e as Error).message }, 500);
@@ -77,6 +85,16 @@ app.post("/webhook", async (c) => {
   return c.text("ok");
 });
 
+// circus の求人URL(例 https://circus-job.com/jobs/20000 や /search/20000)や
+// 「circus 20000」から求人IDを抽出する。見つからなければ null。
+function parseCircusJobId(text: string): number | null {
+  const m = text.match(/(?:jobs|search)\/(\d+)/);
+  if (m) return Number(m[1]);
+  const m2 = text.match(/(?:circus|求人)\D{0,4}(\d{3,8})/i);
+  if (m2) return Number(m2[1]);
+  return null;
+}
+
 // 「株式会社◯◯ 理論年収500万」から企業名と理論年収(万円)を分離する。
 function parseCompanyAndTheory(text: string): { company: string; theoryMan: number | null } {
   let theoryMan: number | null = null;
@@ -101,12 +119,15 @@ async function handleMessage(env: Env, text: string): Promise<string> {
     return HELP_TEXT;
   }
 
-  const { company, theoryMan } = parseCompanyAndTheory(trimmed);
+  const circusJobId = parseCircusJobId(trimmed);
+  // URL部分は企業名から取り除く
+  const withoutUrl = trimmed.replace(/https?:\/\/\S+/g, " ").trim();
+  const { company, theoryMan } = parseCompanyAndTheory(withoutUrl);
   if (!company) {
     return "企業名を読み取れませんでした。\n" + HELP_TEXT;
   }
   try {
-    const result = await compareReward(env, company, theoryMan);
+    const result = await compareReward(env, company, theoryMan, circusJobId);
     return formatComparison(result);
   } catch (e) {
     return `報酬比較に失敗しました: ${(e as Error).message}`;

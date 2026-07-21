@@ -61,6 +61,17 @@ LINEでこう送るだけ:
 料率型を金額換算するには理論年収が必要です。circus自動ログインを設定していれば理論年収は
 自動取得されます。設定しない場合は `理論年収500万` のように付けて送ってください。
 
+### circus の求人URLで理論年収を自動取得
+
+circus は**求人の一覧/検索**がアカウント権限で拒否されることがありますが、**求人1件の直接取得は動作**します。
+そこで、比較したい企業の circus 求人ページを開いて、その**URL（求人IDが入っている）を一緒に渡す**と、
+理論年収を circus から自動取得し、料率型（◯%）の金額換算に使います。circus 自身の成約手数料も表示します。
+
+- Web UI: 「circus求人URL/ID（任意）」欄に貼る
+- LINE: 企業名と一緒に URL を送る（例: `楽天トータルソリューションズ https://circus-job.com/jobs/20000`）
+
+対応するURL形式: `https://circus-job.com/jobs/<id>`、`https://circus-job.com/search/<id>` など（`/jobs/` または `/search/` の直後の数字を求人IDとして使用）。
+
 ### circus 連携の技術メモ
 
 circusの内部API（`login-v2` / `get-job-search-v2`、認証ヘッダ

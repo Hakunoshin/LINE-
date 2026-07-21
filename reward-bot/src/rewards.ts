@@ -65,6 +65,8 @@ const PETERPAN_SHEET = {
 // circus のログインは api-v2 の公開エンドポイント、データ取得は同一オリジンBFF (/api/*)。
 const CIRCUS_LOGIN_URL = "https://api-v2.circus-job.com/public/sessions";
 const CIRCUS_JOBSEARCH_URL = "https://circus-job.com/api/jobSearch";
+// 求人ID直接取得 (検索が権限で塞がれていてもこちらは動く): /api/jobSearch?id=<jobId>
+const CIRCUS_JOB_BY_ID_URL = "https://circus-job.com/api/jobSearch";
 
 // 媒体ごとの取り分係数。成約報酬にこの係数を掛けた額で比較する。
 // (peterpan は 0.8倍、trueaim は 0.9倍、circus は等倍)
@@ -406,6 +408,34 @@ function circusRewardRaw(job: any): string | null {
   return null;
 }
 
+/** circus の求人IDから理論年収と成果報酬を直接取得する (検索不要・要認証情報)。 */
+async function fetchCircusJobById(
+  env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string },
+  jobId: number
+): Promise<CircusData | null> {
+  if (!env.CIRCUS_EMAIL || !env.CIRCUS_PASSWORD) return null;
+  const auth = await circusLogin(env.CIRCUS_EMAIL, env.CIRCUS_PASSWORD);
+  if (!auth) return null;
+  try {
+    const res = await fetch(`${CIRCUS_JOB_BY_ID_URL}?id=${encodeURIComponent(String(jobId))}`, {
+      headers: {
+        "x-circus-authentication-token": auth.token,
+        cookie: auth.cookie,
+        origin: "https://circus-job.com",
+      },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as any;
+    const job = data?.payload?.data ?? data; // by-id は求人オブジェクトを直接返す
+    if (!job || typeof job !== "object" || !("commissionFee" in job || "expectedAnnualSalary" in job)) {
+      return null;
+    }
+    return { theoryIncomeMan: circusTheoryMan(job), rewardRaw: circusRewardRaw(job) };
+  } catch {
+    return null;
+  }
+}
+
 /** circus から企業の理論年収と成果報酬を取得。失敗時は null。 */
 async function fetchCircus(
   env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string },
@@ -451,13 +481,17 @@ function matchCompany(sources: RewardSource[], target: string): RewardSource | n
 export async function compareReward(
   env: { CIRCUS_EMAIL?: string; CIRCUS_PASSWORD?: string },
   companyName: string,
-  theoryIncomeOverrideMan?: number | null
+  theoryIncomeOverrideMan?: number | null,
+  circusJobId?: number | null
 ): Promise<ComparisonResult> {
   const [peterpanNotion, peterpanSheet, trueaim, circus] = await Promise.all([
     fetchPeterpanNotion().catch(() => [] as RewardSource[]),
     fetchPeterpanSheet().catch(() => [] as RewardSource[]),
     fetchTrueaimNotion().catch(() => [] as RewardSource[]),
-    fetchCircus(env, companyName).catch(() => null),
+    // 求人IDが指定されていれば検索を回避して直接取得 (検索は権限で塞がれるため優先)
+    circusJobId != null
+      ? fetchCircusJobById(env, circusJobId).catch(() => null)
+      : fetchCircus(env, companyName).catch(() => null),
   ]);
 
   // 理論年収: 手入力 > circus

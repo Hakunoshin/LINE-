@@ -59,7 +59,7 @@ export const PAGE = `<!doctype html>
   .winner .crown { color: var(--gold); }
   .raw { font-size: 11px; color: var(--sub); margin-top: 2px; }
   form {
-    flex: none; display: flex; gap: 8px; padding: 12px; background: var(--panel);
+    flex: none; display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; background: var(--panel);
     border-top: 1px solid var(--line); align-items: center; padding-bottom: calc(12px + env(safe-area-inset-bottom));
   }
   input {
@@ -67,8 +67,9 @@ export const PAGE = `<!doctype html>
     background: var(--bg); color: var(--ink); outline: none;
   }
   input:focus { border-color: var(--brand); }
-  #company { flex: 1; min-width: 0; }
-  #theory { width: 128px; }
+  #company { flex: 1 1 200px; min-width: 0; }
+  #circus { flex: 1 1 180px; min-width: 0; }
+  #theory { flex: 0 0 118px; width: 118px; }
   button {
     font: inherit; font-weight: 700; padding: 12px 18px; border: none; border-radius: 12px;
     background: var(--brand); color: var(--brand-ink); cursor: pointer;
@@ -90,9 +91,10 @@ export const PAGE = `<!doctype html>
     <div class="row bot"><div class="bubble">企業名を入力すると、peterpan・trueaim・circus の成約報酬を比較して一番高い媒体を表示します。
 料率型（理論年収×◯%）を金額換算するときは「理論年収(万円)」も入れてください。</div></div>
   </div>
-  <div class="hint">例：株式会社レオパレス21 ／ 理論年収 500（万円・任意）</div>
+  <div class="hint">例：株式会社レオパレス21 ／ 理論年収 500（万円・任意）／ circus求人URLを入れると理論年収を自動取得</div>
   <form id="f">
     <input id="company" type="text" placeholder="企業名（フルネーム）" autocomplete="off" enterkeyhint="search" />
+    <input id="circus" type="text" placeholder="circus求人URL/ID（任意）" autocomplete="off" />
     <input id="theory" type="number" inputmode="numeric" placeholder="理論年収 万" />
     <button id="send" type="submit">比較</button>
   </form>
@@ -102,6 +104,7 @@ export const PAGE = `<!doctype html>
   var form = document.getElementById("f");
   var companyEl = document.getElementById("company");
   var theoryEl = document.getElementById("theory");
+  var circusEl = document.getElementById("circus");
   var sendBtn = document.getElementById("send");
 
   function esc(s){ return String(s).replace(/[&<>]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
@@ -167,13 +170,19 @@ export const PAGE = `<!doctype html>
     var company = companyEl.value.trim();
     if (!company) return;
     var theory = theoryEl.value.trim();
-    var label = esc(company) + (theory ? ('　<small>理論年収 ' + esc(theory) + '万</small>') : '');
+    var circus = circusEl.value.trim();
+    var label = esc(company)
+      + (theory ? ('　<small>理論年収 ' + esc(theory) + '万</small>') : '')
+      + (circus ? ('　<small>circus求人</small>') : '');
     addRow("me", label);
     companyEl.value = "";
+    circusEl.value = "";
     sendBtn.disabled = true;
     var loading = addRow("bot", '<span class="dots"><span>●</span><span>●</span><span>●</span></span>');
     try {
-      var url = "/api/compare?company=" + encodeURIComponent(company) + (theory ? ("&theory=" + encodeURIComponent(theory)) : "");
+      var url = "/api/compare?company=" + encodeURIComponent(company)
+        + (theory ? ("&theory=" + encodeURIComponent(theory)) : "")
+        + (circus ? ("&circusJob=" + encodeURIComponent(circus)) : "");
       var res = await fetch(url);
       if (!res.ok) throw new Error("HTTP " + res.status);
       var data = await res.json();
