@@ -66,6 +66,14 @@ const PETERPAN_SHEET = {
 const CIRCUS_LOGIN_URL = "https://api-v2.circus-job.com/public/sessions";
 const CIRCUS_JOBSEARCH_URL = "https://circus-job.com/api/jobSearch";
 
+// 媒体ごとの取り分係数。成約報酬にこの係数を掛けた額で比較する。
+// (peterpan は 0.8倍、trueaim は 0.9倍、circus は等倍)
+const PLATFORM_MULTIPLIER: Record<string, number> = {
+  circus: 1,
+  peterpan: 0.8,
+  trueaim: 0.9,
+};
+
 // ---- テキスト正規化・パース --------------------------------------------
 
 /** 全角→半角・波ダッシュ統一など。 */
@@ -467,7 +475,11 @@ export async function compareReward(
     if (!src) return { platform, company: null, rewardRaw: null, bestYenMan: null, note: "該当求人なし" };
     const parsed = parseReward(src.rewardRaw);
     const { yen, note } = bestYenMan(parsed, theoryIncomeMan);
-    return { platform, company: src.company, rewardRaw: src.rewardRaw, bestYenMan: yen, note };
+    const mult = PLATFORM_MULTIPLIER[platform] ?? 1;
+    // 成約報酬に媒体ごとの取り分係数を掛けた額で比較する。
+    const adjYen = yen == null ? null : Math.round(yen * mult * 10) / 10;
+    const adjNote = mult === 1 ? note : `${note} ×${mult}`;
+    return { platform, company: src.company, rewardRaw: src.rewardRaw, bestYenMan: adjYen, note: adjNote };
   };
 
   const circusSrc: RewardSource | null = circus?.rewardRaw
