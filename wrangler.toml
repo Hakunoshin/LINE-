@@ -1,6 +1,8 @@
 name = "personal-line-agent"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
+# Anthropic SDKがnode:path等のNode組み込みを参照するため必要。
+compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "DB"
