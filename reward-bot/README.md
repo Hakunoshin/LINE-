@@ -6,6 +6,18 @@
 
 ## 使い方
 
+### Webアプリ（専用チャット画面）
+
+デプロイ後のWorker URL（例: `https://reward-compare-line-bot.<your-subdomain>.workers.dev/`）を
+ブラウザで開くと、専用のチャット画面が表示されます。**企業名を入力して「比較」を押すだけ**で
+peterpan / trueaim / circus の成約報酬を自動比較し、一番高い媒体を表示します。
+料率型（理論年収×◯%）を金額換算したいときは「理論年収(万円)」も入れてください。
+
+内部的にはブラウザ → `GET /api/compare?company=…&theory=…` → Workerが3媒体を取得・計算 → JSON応答、
+という流れです（データ取得はWorker側で行うのでブラウザのCSP制約を受けません）。
+
+### LINE
+
 LINEでこう送るだけ:
 
 ```
@@ -93,7 +105,8 @@ npm run deploy
 ```
 reward-bot/
   src/
-    index.ts     Honoアプリ本体。LINE Webhook処理
+    index.ts     Honoアプリ本体。Web UI(/)・比較API(/api/compare)・LINE Webhook
+    page.ts      ブラウザ用の専用チャット画面(HTML)
     line.ts      LINE Messaging APIの署名検証・reply
     rewards.ts   成約報酬の取得(Notion/Sheet/circus)・報酬パース・比較
   package.json / wrangler.toml / tsconfig.json

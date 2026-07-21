@@ -5,6 +5,7 @@
 import { Hono } from "hono";
 import { verifyLineSignature, replyText, type LineWebhookBody } from "./line";
 import { compareReward, formatComparison } from "./rewards";
+import { PAGE } from "./page";
 
 export interface Env {
   LINE_CHANNEL_ACCESS_TOKEN: string;
@@ -31,7 +32,24 @@ const HELP_TEXT = [
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/", (c) => c.text("reward-compare-line-bot is running"));
+// Web UI (ブラウザで開く専用チャット画面)
+app.get("/", (c) => c.html(PAGE));
+
+// 企業名を受け取り比較結果をJSONで返す。Web UIから呼ばれる。
+app.get("/api/compare", async (c) => {
+  const company = (c.req.query("company") ?? "").trim();
+  if (!company) {
+    return c.json({ error: "company is required" }, 400);
+  }
+  const theoryRaw = c.req.query("theory");
+  const theoryMan = theoryRaw != null && theoryRaw !== "" ? Number(theoryRaw) : null;
+  try {
+    const result = await compareReward(c.env, company, Number.isFinite(theoryMan as number) ? theoryMan : null);
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
 
 app.post("/webhook", async (c) => {
   const rawBody = await c.req.text();
