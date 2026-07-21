@@ -62,7 +62,9 @@ const PETERPAN_SHEET = {
   rewardHeader: "ご紹介料",
 };
 
-const CIRCUS_API = "https://api.circus-job.com/api";
+// circus のログインは api-v2 の公開エンドポイント、データ取得は同一オリジンBFF (/api/*)。
+const CIRCUS_LOGIN_URL = "https://api-v2.circus-job.com/public/sessions";
+const CIRCUS_JOBSEARCH_URL = "https://circus-job.com/api/jobSearch";
 
 // ---- テキスト正規化・パース --------------------------------------------
 
@@ -295,39 +297,44 @@ function extractCookieValue(cookieHeader: string, name: string): string | null {
 
 async function circusLogin(email: string, password: string): Promise<CircusAuth | null> {
   try {
-    const res = await fetch(`${CIRCUS_API}/login-v2`, {
+    const res = await fetch(CIRCUS_LOGIN_URL, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password, isAdmin: false }),
+      headers: { "content-type": "application/json", origin: "https://circus-job.com" },
+      // forceLogin: 既に別セッションがあっても強制ログインする (409回避)
+      body: JSON.stringify({ email, password, forceLogin: true }),
     });
     if (!res.ok) return null;
     const getSetCookie = (res.headers as { getSetCookie?: () => string[] }).getSetCookie;
-    const cookie = getSetCookie ? getSetCookie.call(res.headers).join("; ") : res.headers.get("set-cookie") ?? "";
+    const setCookie = getSetCookie ? getSetCookie.call(res.headers).join("; ") : res.headers.get("set-cookie") ?? "";
     const data = (await res.json().catch(() => ({}))) as any;
-    const token =
-      data?.token ??
-      data?.data?.token ??
-      data?.session?.token ??
-      extractCookieValue(cookie, "circus-session-token");
+    const token = data?.token ?? extractCookieValue(setCookie, "access_token");
     if (!token) return null;
-    return { token: String(token), cookie };
+    // 取得したトークンを access_token cookie としても後続リクエストに付与する
+    const accessCookie = extractCookieValue(setCookie, "access_token") ?? String(token);
+    return { token: String(token), cookie: `access_token=${accessCookie}` };
   } catch {
     return null;
   }
 }
 
-/** get-job-search-v2 を企業名キーワードで叩き、求人らしきノードを収集する。 */
+/** 同一オリジンBFFの jobSearch を企業名キーワードで叩き、求人ノードを収集する。 */
 async function circusSearchJobs(auth: CircusAuth, companyName: string): Promise<any[]> {
-  const qJson = JSON.stringify([{ option: 1, keyword: companyName, logicType: "and" }]);
-  const url = new URL(`${CIRCUS_API}/get-job-search-v2`);
-  url.searchParams.set("qJson", qJson);
-  url.searchParams.set("page", "1");
-  url.searchParams.set("orderBy", "recommendScore");
-  url.searchParams.set("order", "desc");
+  const url = new URL(CIRCUS_JOBSEARCH_URL);
+  const q = url.searchParams;
+  // qJson は [and, or, excludeAnd, excludeOr] の4要素。各要素はJSON文字列。
+  q.append("qJson[0]", JSON.stringify({ option: 1, keyword: companyName, logicType: "and" }));
+  q.append("qJson[1]", JSON.stringify({ option: 1, keyword: "", logicType: "or" }));
+  q.append("qJson[2]", JSON.stringify({ option: 1, keyword: "", logicType: "excludeAnd" }));
+  q.append("qJson[3]", JSON.stringify({ option: 1, keyword: "", logicType: "excludeOr" }));
+  q.append("selectionDaysIncludingDuringMeasurement[0]", "included");
+  q.append("page", "1");
+  q.append("orderBy", "recommendScore");
+  q.append("order", "desc");
   const res = await fetch(url.toString(), {
     headers: {
       "x-circus-authentication-token": auth.token,
-      ...(auth.cookie ? { cookie: auth.cookie } : {}),
+      cookie: auth.cookie,
+      origin: "https://circus-job.com",
     },
   });
   if (!res.ok) return [];
