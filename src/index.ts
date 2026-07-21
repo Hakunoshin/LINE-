@@ -20,9 +20,23 @@ import {
   listIncompleteTasks,
   insertTask,
 } from "./google";
+import {
+  insertPostMetric,
+  updatePostMetric,
+  listRecentPostMetrics,
+  listTopPostMetrics,
+} from "./db";
 import { handleWithAi } from "./ai";
 import { circusLogin, fetchCircusJobs, formatCircusJobPost, type CircusJob } from "./circus";
-import { postThreadsText } from "./threads";
+import {
+  postThreadsText,
+  buildThreadsAuthUrl,
+  completeThreadsOAuth,
+  getValidThreadsConfig,
+  getThreadsInsights,
+  type ThreadsConfig,
+} from "./threads";
+import { generateThreadsPost, analyzePerformance } from "./threadsContent";
 
 export interface Env {
   DB: D1Database;
@@ -48,13 +62,18 @@ export interface Env {
   CIRCUS_PASSWORD?: string;
   // 静的なBearerトークンを直接持っている場合はこちら(ログイン不要になる)。
   CIRCUS_API_TOKEN?: string;
-  // ThreadsのUser ID と長期アクセストークン。両方揃わないと投稿しない。
+  // Threads OAuthアプリ。設定すると /threads/start で連携でき、トークンを自動refreshする。
+  THREADS_APP_ID?: string;
+  THREADS_APP_SECRET?: string;
+  // (任意) 手動発行した長期トークンを直接使う場合。OAuth連携を使うなら不要。
   THREADS_USER_ID?: string;
   THREADS_ACCESS_TOKEN?: string;
   // 自動投稿を実行するJSTの時刻 ("HH:MM"のカンマ区切り)。未設定なら DEFAULT_THREADS_AUTOPOST_TIMES。
   THREADS_AUTOPOST_TIME_JST?: string;
   // 1回の実行で投稿する求人の最大件数。未設定なら DEFAULT_THREADS_MAX_POSTS。
   THREADS_MAX_POSTS_PER_RUN?: string;
+  // 投稿指標の収集と分析を行うJSTの時刻。未設定なら DEFAULT_THREADS_INSIGHTS_TIME。
+  THREADS_INSIGHTS_TIME_JST?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -76,6 +95,8 @@ const TOMORROW_PREVIEW_TIME_JST = "21:00";
 // circus求人 → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回。
 const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
 const DEFAULT_THREADS_MAX_POSTS = 1;
+// 投稿指標の収集+分析を回す時刻(1日1回)。
+const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "求人投稿";
 
 const HELP_TEXT = [
@@ -128,6 +149,39 @@ app.get("/oauth/callback", async (c) => {
     return c.text(`Google連携に失敗しました: ${(e as Error).message}`, 500);
   }
   return c.text("Google連携が完了しました。このタブは閉じて大丈夫です。");
+});
+
+// Threads連携: /threads/start にアクセス → 認可 → /threads/callback で長期トークンをD1に保存。
+app.get("/threads/start", (c) => {
+  const { THREADS_APP_ID } = c.env;
+  if (!THREADS_APP_ID) {
+    return c.text("THREADS_APP_ID が設定されていません。", 500);
+  }
+  const redirectUri = new URL("/threads/callback", c.req.url).toString();
+  return c.redirect(buildThreadsAuthUrl(THREADS_APP_ID, redirectUri));
+});
+
+app.get("/threads/callback", async (c) => {
+  const { THREADS_APP_ID, THREADS_APP_SECRET } = c.env;
+  if (!THREADS_APP_ID || !THREADS_APP_SECRET) {
+    return c.text("THREADS_APP_ID / THREADS_APP_SECRET が設定されていません。", 500);
+  }
+  const error = c.req.query("error");
+  if (error) {
+    return c.text(`Threads認証がキャンセルまたは失敗しました: ${error}`, 400);
+  }
+  // Threadsはcodeの末尾に "#_" を付けることがあるので除去する。
+  const code = (c.req.query("code") ?? "").replace(/#_$/, "");
+  if (!code) {
+    return c.text("codeパラメータがありません。", 400);
+  }
+  const redirectUri = new URL("/threads/callback", c.req.url).toString();
+  try {
+    await completeThreadsOAuth(THREADS_APP_ID, THREADS_APP_SECRET, redirectUri, code, c.env.DB);
+  } catch (e) {
+    return c.text(`Threads連携に失敗しました: ${(e as Error).message}`, 500);
+  }
+  return c.text("Threads連携が完了しました。このタブは閉じて大丈夫です。");
 });
 
 app.post("/webhook", async (c) => {
@@ -244,13 +298,16 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
   }
 
   if (trimmed === THREADS_POST_COMMAND || trimmed === "Threads投稿") {
-    if (!getThreadsConfig(env)) {
-      return "circus/Threadsの連携が未設定です。CIRCUS_JOBS_URL・THREADS_USER_ID・THREADS_ACCESS_TOKEN を設定してください。";
+    if (!getCircusSource(env)) {
+      return "circusの取得設定が未設定です。CIRCUS_JOBS_URL とログイン情報(CIRCUS_LOGIN_URL/CIRCUS_EMAIL/CIRCUS_PASSWORD)を設定してください。";
+    }
+    if (!isThreadsConfigured(env)) {
+      return `Threadsが未連携です。${baseUrl}/threads/start から連携してください。`;
     }
     const result = await postNewCircusJobsToThreads(env, getThreadsMaxPosts(env));
     if (result.posted.length > 0) {
       const lines = [`Threadsに${result.posted.length}件投稿しました。`];
-      for (const job of result.posted) {
+      for (const { job } of result.posted) {
         lines.push(`・${job.title}${job.company ? ` (${job.company})` : ""}`);
       }
       return lines.join("\n");
@@ -489,60 +546,80 @@ async function runInterviewPrepIfDue(env: Env): Promise<void> {
   }
 }
 
-// circus/Threadsの必須設定が揃っているか確認する。
-// circus側は「ログイン情報(URL+メール+パスワード)」または「静的トークン」のどちらかが必要。
-function getThreadsConfig(env: Env): {
-  circusUrl: string;
-  circusLogin?: { loginUrl: string; email: string; password: string };
-  circusToken?: string;
-  threadsUserId: string;
-  threadsToken: string;
-} | null {
-  const { CIRCUS_JOBS_URL, THREADS_USER_ID, THREADS_ACCESS_TOKEN } = env;
-  if (!CIRCUS_JOBS_URL || !THREADS_USER_ID || !THREADS_ACCESS_TOKEN) return null;
+// circus側の求人取得元。ログイン情報(URL+メール+パスワード)または静的トークンのどちらかが必要。
+interface CircusSource {
+  url: string;
+  login?: { loginUrl: string; email: string; password: string };
+  token?: string;
+}
 
+function getCircusSource(env: Env): CircusSource | null {
+  if (!env.CIRCUS_JOBS_URL) return null;
   const hasLogin = !!(env.CIRCUS_LOGIN_URL && env.CIRCUS_EMAIL && env.CIRCUS_PASSWORD);
-  // ログイン情報も静的トークンも無ければ求人を取得できない
   if (!hasLogin && !env.CIRCUS_API_TOKEN) return null;
-
   return {
-    circusUrl: CIRCUS_JOBS_URL,
-    circusLogin: hasLogin
+    url: env.CIRCUS_JOBS_URL,
+    login: hasLogin
       ? { loginUrl: env.CIRCUS_LOGIN_URL!, email: env.CIRCUS_EMAIL!, password: env.CIRCUS_PASSWORD! }
       : undefined,
-    circusToken: env.CIRCUS_API_TOKEN,
-    threadsUserId: THREADS_USER_ID,
-    threadsToken: THREADS_ACCESS_TOKEN,
+    token: env.CIRCUS_API_TOKEN,
   };
 }
 
+// Threadsの投稿先が設定されているか(静的トークン or OAuthアプリのどちらか)。
+function isThreadsConfigured(env: Env): boolean {
+  const hasStatic = !!(env.THREADS_USER_ID && env.THREADS_ACCESS_TOKEN);
+  const hasApp = !!(env.THREADS_APP_ID && env.THREADS_APP_SECRET);
+  return hasStatic || hasApp;
+}
+
+// 投稿に使う有効なThreads認証情報を返す。静的トークン優先、無ければD1(自動refresh)。
+async function resolveThreadsConfig(env: Env): Promise<ThreadsConfig | null> {
+  if (env.THREADS_USER_ID && env.THREADS_ACCESS_TOKEN) {
+    return { userId: env.THREADS_USER_ID, accessToken: env.THREADS_ACCESS_TOKEN };
+  }
+  return await getValidThreadsConfig(env.DB);
+}
+
+// circusのセッション/トークンを解決して求人一覧を取得する。
+async function fetchCircusJobsFromSource(source: CircusSource): Promise<CircusJob[]> {
+  const auth = source.login
+    ? await circusLogin(source.login.loginUrl, source.login.email, source.login.password)
+    : { bearer: source.token };
+  return await fetchCircusJobs(source.url, auth);
+}
+
 interface ThreadsPostResult {
-  posted: CircusJob[];
+  posted: Array<{ job: CircusJob; text: string }>;
   skipped: number; // 投稿済みで今回スキップした件数
   fetched: number;
   error?: string;
 }
 
 // circusから求人を取得し、未投稿のものを最大maxPosts件だけThreadsへ投稿する。
-// 投稿した求人はD1に記録して二度と投稿しないようにする。
+// 投稿文はClaudeが「これまで伸びた傾向(learnings)」を踏まえて生成し、
+// 投稿した求人・本文はD1に記録して重複防止と後の分析に使う。
 async function postNewCircusJobsToThreads(env: Env, maxPosts: number): Promise<ThreadsPostResult> {
-  const config = getThreadsConfig(env);
-  if (!config) {
-    return { posted: [], skipped: 0, fetched: 0, error: "circus/Threadsの設定(URL・トークン)が未設定です。" };
+  const source = getCircusSource(env);
+  if (!source) {
+    return { posted: [], skipped: 0, fetched: 0, error: "circusの取得設定(URL・ログイン情報/トークン)が未設定です。" };
+  }
+  const threads = await resolveThreadsConfig(env);
+  if (!threads) {
+    return { posted: [], skipped: 0, fetched: 0, error: "Threads未連携です。/threads/start から連携してください。" };
   }
 
   let jobs: CircusJob[];
   try {
-    // ログイン情報があれば先にログインしてセッションを得る。無ければ静的トークンを使う。
-    const auth = config.circusLogin
-      ? await circusLogin(config.circusLogin.loginUrl, config.circusLogin.email, config.circusLogin.password)
-      : { bearer: config.circusToken };
-    jobs = await fetchCircusJobs(config.circusUrl, auth);
+    jobs = await fetchCircusJobsFromSource(source);
   } catch (e) {
     return { posted: [], skipped: 0, fetched: 0, error: `求人取得に失敗: ${(e as Error).message}` };
   }
 
-  const posted: CircusJob[] = [];
+  // 「伸びる型」の分析メモを一度だけ読み込み、生成に反映する。
+  const learnings = await getAppState(env.DB, "threads_post_learnings");
+
+  const posted: ThreadsPostResult["posted"] = [];
   let skipped = 0;
   for (const job of jobs) {
     if (posted.length >= maxPosts) break;
@@ -550,13 +627,22 @@ async function postNewCircusJobsToThreads(env: Env, maxPosts: number): Promise<T
       skipped++;
       continue;
     }
+
+    // 投稿文の生成: APIキーがあればClaudeで生成、失敗/未設定ならテンプレート。
+    let text = formatCircusJobPost(job);
+    if (env.ANTHROPIC_API_KEY) {
+      try {
+        text = await generateThreadsPost(env.ANTHROPIC_API_KEY, job, learnings);
+      } catch {
+        text = formatCircusJobPost(job);
+      }
+    }
+
     try {
-      const mediaId = await postThreadsText(
-        { userId: config.threadsUserId, accessToken: config.threadsToken },
-        formatCircusJobPost(job)
-      );
+      const mediaId = await postThreadsText(threads, text);
       await markJobPosted(env.DB, job.key, job.title, mediaId);
-      posted.push(job);
+      await insertPostMetric(env.DB, mediaId, job.key, text);
+      posted.push({ job, text });
     } catch (e) {
       // 投稿に失敗した求人は記録しない(次回再試行される)。1件失敗しても他は続行する。
       return {
@@ -586,12 +672,24 @@ function getThreadsAutopostTimes(env: Env): string[] {
     .filter(Boolean);
 }
 
+// 投稿結果を「秘書からの報告」としてLINEに通知する。投稿本文もそのまま添える。
+async function notifyOwnerOfPosts(env: Env, posted: ThreadsPostResult["posted"]): Promise<void> {
+  if (posted.length === 0) return;
+  const target = await getPushTargetUserId(env);
+  if (!target) return;
+
+  for (const { text } of posted) {
+    const message = ["秘書です。以下の求人をThreadsに投稿しました🧵", "", text].join("\n");
+    await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, message);
+  }
+}
+
 // circusの新着求人をThreadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
 async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
   const now = new Date();
   const nowHm = currentJstHm(now);
   if (!getThreadsAutopostTimes(env).includes(nowHm)) return;
-  if (!getThreadsConfig(env)) return; // 未設定なら何もしない
+  if (!getCircusSource(env) || !isThreadsConfigured(env)) return; // 未設定なら何もしない
 
   // 「日付+時刻」単位で送信済みを記録し、同じ時刻枠での二重投稿(cron再試行等)を防ぐ。
   const slotKey = `${jstDateKey(now)} ${nowHm}`;
@@ -604,15 +702,52 @@ async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
     return;
   }
   await setAppState(env.DB, "last_threads_autopost_slot", slotKey);
+  await notifyOwnerOfPosts(env, result.posted);
+}
 
-  // 投稿結果をオーナーにLINEで通知する(送信先が登録済みのときのみ)。
-  const target = await getPushTargetUserId(env);
-  if (target && result.posted.length > 0) {
-    const lines = ["🧵 Threadsに新着求人を投稿しました"];
-    for (const job of result.posted) {
-      lines.push(`・${job.title}${job.company ? ` (${job.company})` : ""}`);
+function getThreadsInsightsTime(env: Env): string {
+  return env.THREADS_INSIGHTS_TIME_JST || DEFAULT_THREADS_INSIGHTS_TIME;
+}
+
+// 直近14日の投稿のインサイトをThreadsから取得して更新し、
+// その結果をClaudeで分析して「伸びる型」のメモを更新する。既定23:30 JSTに1日1回。
+async function runThreadsInsightsIfDue(env: Env): Promise<void> {
+  const now = new Date();
+  if (currentJstHm(now) !== getThreadsInsightsTime(env)) return;
+  if (!isThreadsConfigured(env)) return;
+
+  const todayKey = jstDateKey(now);
+  const lastKey = await getAppState(env.DB, "last_threads_insights_date");
+  if (lastKey === todayKey) return;
+
+  const threads = await resolveThreadsConfig(env);
+  if (!threads) return;
+
+  try {
+    // (1) 直近14日の投稿の指標を更新する
+    const since = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const recent = await listRecentPostMetrics(env.DB, since);
+    for (const post of recent) {
+      try {
+        const insights = await getThreadsInsights(threads, post.media_id);
+        await updatePostMetric(env.DB, post.media_id, insights);
+      } catch {
+        // 個別の取得失敗は無視して次へ(投稿直後で指標未確定など)
+      }
     }
-    await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, lines.join("\n"));
+
+    // (2) 上位投稿をClaudeで分析し、「伸びる型」メモを更新する
+    if (env.ANTHROPIC_API_KEY) {
+      const top = await listTopPostMetrics(env.DB, 20);
+      if (top.length >= 3) {
+        const memo = await analyzePerformance(env.ANTHROPIC_API_KEY, top);
+        if (memo) await setAppState(env.DB, "threads_post_learnings", memo);
+      }
+    }
+
+    await setAppState(env.DB, "last_threads_insights_date", todayKey);
+  } catch {
+    // 全体失敗時はstate未更新のまま翌分に再試行される
   }
 }
 
@@ -625,5 +760,6 @@ export default {
     ctx.waitUntil(runInterviewPrepIfDue(env));
     ctx.waitUntil(runTomorrowPreviewIfDue(env));
     ctx.waitUntil(runThreadsAutoPostIfDue(env));
+    ctx.waitUntil(runThreadsInsightsIfDue(env));
   },
 };

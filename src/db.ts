@@ -112,6 +112,117 @@ export async function markJobPosted(
     .run();
 }
 
+// --- Threads OAuthトークン(1行固定) ---
+
+export interface ThreadsTokens {
+  user_id: string;
+  access_token: string;
+  expires_at: string;
+}
+
+export async function getThreadsTokens(db: D1Database): Promise<ThreadsTokens | null> {
+  const result = await db
+    .prepare("SELECT user_id, access_token, expires_at FROM threads_tokens WHERE id = 1")
+    .first<ThreadsTokens>();
+  return result ?? null;
+}
+
+export async function saveThreadsTokens(
+  db: D1Database,
+  userId: string,
+  accessToken: string,
+  expiresAtUtcIso: string
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO threads_tokens (id, user_id, access_token, expires_at, updated_at)
+       VALUES (1, ?, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET
+         user_id = excluded.user_id,
+         access_token = excluded.access_token,
+         expires_at = excluded.expires_at,
+         updated_at = datetime('now')`
+    )
+    .bind(userId, accessToken, expiresAtUtcIso)
+    .run();
+}
+
+// --- 投稿指標(パフォーマンス分析用) ---
+
+export interface PostMetric {
+  media_id: string;
+  job_key: string | null;
+  text: string;
+  views: number;
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+  posted_at: string;
+  metrics_updated_at: string | null;
+}
+
+export async function insertPostMetric(
+  db: D1Database,
+  mediaId: string,
+  jobKey: string,
+  text: string
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO threads_post_metrics (media_id, job_key, text) VALUES (?, ?, ?)
+       ON CONFLICT(media_id) DO NOTHING`
+    )
+    .bind(mediaId, jobKey, text)
+    .run();
+}
+
+export interface PostInsightValues {
+  views: number;
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+}
+
+export async function updatePostMetric(
+  db: D1Database,
+  mediaId: string,
+  v: PostInsightValues
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE threads_post_metrics
+       SET views = ?, likes = ?, replies = ?, reposts = ?, quotes = ?, metrics_updated_at = datetime('now')
+       WHERE media_id = ?`
+    )
+    .bind(v.views, v.likes, v.replies, v.reposts, v.quotes, mediaId)
+    .run();
+}
+
+// 直近N日以内に投稿したもの(指標を更新したい対象)を返す。
+export async function listRecentPostMetrics(db: D1Database, sinceUtcIso: string): Promise<PostMetric[]> {
+  const result = await db
+    .prepare("SELECT * FROM threads_post_metrics WHERE posted_at >= ? ORDER BY posted_at DESC")
+    .bind(sinceUtcIso)
+    .all<PostMetric>();
+  return result.results ?? [];
+}
+
+// エンゲージメント(views優先)が高い順に上位を返す。分析のインプットに使う。
+export async function listTopPostMetrics(db: D1Database, limit: number): Promise<PostMetric[]> {
+  const result = await db
+    .prepare(
+      `SELECT * FROM threads_post_metrics
+       WHERE metrics_updated_at IS NOT NULL
+       ORDER BY (likes + replies + reposts + quotes) DESC, views DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<PostMetric>();
+  return result.results ?? [];
+}
+
 export async function getAppState(db: D1Database, key: string): Promise<string | null> {
   const result = await db
     .prepare("SELECT value FROM app_state WHERE key = ?")
