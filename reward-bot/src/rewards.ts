@@ -342,7 +342,7 @@ async function circusSearchJobs(auth: CircusAuth, companyName: string): Promise<
   return collectJobNodes(data);
 }
 
-/** レスポンスを再帰的に走査し、company を持ち理論年収/報酬フィールドを持つノードを求人とみなす。 */
+/** レスポンスを再帰的に走査し、company と commissionFee を持つノードを求人とみなす。 */
 function collectJobNodes(data: any): any[] {
   const out: any[] = [];
   const visit = (node: any) => {
@@ -351,7 +351,7 @@ function collectJobNodes(data: any): any[] {
       for (const v of node) visit(v);
       return;
     }
-    if (node.company && ("theoreticalAnnualIncome" in node || "commissionFee" in node)) {
+    if (node.company && ("commissionFee" in node || "expectedAnnualSalary" in node)) {
       out.push(node);
     }
     for (const v of Object.values(node)) visit(v);
@@ -366,29 +366,35 @@ function circusCompanyName(job: any): string {
   return typeof c === "object" ? String(c.name ?? c.companyName ?? "") : String(c);
 }
 
-/** 円 or 万円で来る金額を万円に正規化する (5,000,000 → 500 / 500 → 500)。 */
+/** 円 or 万円で来る金額を万円に正規化する (1,200,000 → 120 / 120 → 120)。 */
 function toMan(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return n >= 10000 ? Math.round(n / 10000) : n;
+  return n >= 10000 ? Math.round(n / 10000) : Math.round(n);
 }
 
+// 求人の理論年収(万円)を求める。
+// circus の commissionFee = { fee: 手数料率%, calcValue: 手数料額(円) } なので
+//   理論年収(円) = calcValue ÷ fee × 100。取れなければ想定年収の下限で代用する。
 function circusTheoryMan(job: any): number | null {
-  const t = job?.theoreticalAnnualIncome;
-  if (t == null) return null;
-  if (typeof t === "object") {
-    return toMan(t.to ?? t.max ?? t.value ?? t.from ?? t.min);
+  const cf = job?.commissionFee;
+  const fee = Number(cf?.fee);
+  const calc = Number(cf?.calcValue);
+  if (Number.isFinite(fee) && fee > 0 && Number.isFinite(calc) && calc > 0) {
+    // 理論年収(円)=calcValue/fee*100 → 万円換算は ÷10000。まとめると calcValue/fee/100。
+    return Math.round(calc / fee / 100);
   }
-  return toMan(t);
+  const min = job?.expectedAnnualSalary?.min;
+  return toMan(min);
 }
 
+// circus 経由の成約報酬(円→表示用テキスト)。commissionFee.calcValue が手数料額。
 function circusRewardRaw(job: any): string | null {
   const cf = job?.commissionFee;
-  if (!cf || typeof cf !== "object") return null;
-  const priceMan = toMan(cf.commissionFeePrice);
-  const pct = Number(cf.commissionFeePercentage);
-  if (priceMan) return `${priceMan}万円`;
-  if (Number.isFinite(pct) && pct > 0) return `理論年収の${pct}%`;
+  const calcMan = toMan(cf?.calcValue);
+  if (calcMan) return `${calcMan}万円`;
+  const fee = Number(cf?.fee);
+  if (Number.isFinite(fee) && fee > 0) return `理論年収の${fee}%`;
   return null;
 }
 
