@@ -511,16 +511,11 @@ export function formatComparison(result: ComparisonResult): string {
   lines.push("");
 
   const found = result.results.filter((r) => r.company != null);
-  if (found.length === 0) {
-    lines.push("いずれの媒体にも該当求人が見つかりませんでした。");
-    lines.push("企業名をフルネームで送ってみてください。");
-    return lines.join("\n");
-  }
 
   let rank = 1;
   for (const r of result.results) {
     if (r.company == null) {
-      lines.push(`・${r.platform}: 該当求人なし`);
+      lines.push(`・${r.platform}: 該当なし`);
       continue;
     }
     const amount = r.bestYenMan != null ? `${r.bestYenMan}万円` : "金額未定";
@@ -533,6 +528,9 @@ export function formatComparison(result: ComparisonResult): string {
   if (top) {
     lines.push("");
     lines.push(`👑 一番高いのは ${top.platform} (${top.bestYenMan}万円)`);
+  } else if (found.length === 0) {
+    lines.push("");
+    lines.push("全媒体で該当なし。企業名をフルネームで送ってみてください。");
   } else if (result.theoryIncomeMan == null) {
     lines.push("");
     lines.push("※ 料率型のみのため、理論年収を送ると金額で比較できます (例: 理論年収500万)");

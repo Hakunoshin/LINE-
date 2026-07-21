@@ -130,10 +130,6 @@ export const PAGE = `<!doctype html>
     h += '<div class="meta">' + t + '</div>';
 
     var found = r.results.filter(function(x){ return x.company != null; });
-    if (found.length === 0){
-      h += '<div>いずれの媒体にも該当求人が見つかりませんでした。企業名をフルネームで入れてみてください。</div></div>';
-      return h;
-    }
     var rank = 1;
     var topPlatform = null, topYen = null;
     for (var i=0;i<r.results.length;i++){
@@ -157,6 +153,8 @@ export const PAGE = `<!doctype html>
     }
     if (topPlatform != null){
       h += '<div class="winner"><span class="crown">👑</span> 一番高いのは ' + esc(topPlatform) + '（' + topYen + '万円）</div>';
+    } else if (found.length === 0){
+      h += '<div class="winner">全媒体で該当なし。企業名をフルネームで入れてみてください。</div>';
     } else if (r.theoryIncomeMan == null){
       h += '<div class="winner">※ 料率型のみです。理論年収を入れると金額で比較できます。</div>';
     }
