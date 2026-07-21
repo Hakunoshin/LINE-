@@ -34,6 +34,33 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 カレンダーは読み取りのみ、ToDoはGoogle Tasksとの読み書きです（カレンダーへの書き込みは行いません）。
 
+### circus求人のThreads自動投稿（任意）
+
+[circus](https://circus-job.com/) の求人一覧を定期的に取得し、新着求人を [Threads](https://www.threads.net/) へ自動投稿します。
+
+- 毎日決まったJST時刻（デフォルト `10:00`、`THREADS_AUTOPOST_TIME_JST` で変更可）に、circusの新着求人を1件ずつThreadsへ投稿
+- 1回の実行で投稿する件数は `THREADS_MAX_POSTS_PER_RUN`（デフォルト `1`）で調整。過去に投稿した求人はD1に記録され、二度と投稿されません
+- 投稿できた求人はLINEのオーナー宛にも通知されます
+- LINEで `求人投稿` と送ると、その場で新着求人を取得して投稿できます（動作確認用）
+
+投稿本文はタイトル・企業名・勤務地・給与・雇用形態・詳細URL・ハッシュタグを整形し、Threadsの上限500文字に収まるよう自動で丸めます。
+
+必要な設定（すべて揃わないと自動投稿は動きません）:
+
+```bash
+# circusの求人一覧を返すJSONエンドポイント
+npx wrangler secret put CIRCUS_JOBS_URL
+# circus APIのBearerトークン（認証が必要な場合のみ）
+npx wrangler secret put CIRCUS_API_TOKEN
+# ThreadsのUser IDと長期アクセストークン（threads_basic / threads_content_publish 権限）
+npx wrangler secret put THREADS_USER_ID
+npx wrangler secret put THREADS_ACCESS_TOKEN
+```
+
+circusのレスポンスは配列でも `{ "jobs": [...] }` / `{ "data": [...] }` / `{ "results": [...] }` のいずれでも受け付け、
+`title`/`job_title`、`company`/`company_name` などフィールド名の揺れも吸収します。
+投稿時刻や1回あたりの件数は `wrangler.toml` の `[vars]`（`THREADS_AUTOPOST_TIME_JST`, `THREADS_MAX_POSTS_PER_RUN`）でも指定できます。
+
 ### AI応答（任意）
 
 `ANTHROPIC_API_KEY` を設定すると、コマンドに当てはまらないメッセージはすべてClaude（AI）が応答します。
@@ -146,10 +173,13 @@ src/
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
+  circus.ts              circus求人の取得・正規化・Threads投稿文の整形
+  threads.ts             Threads Graph APIへのテキスト投稿(コンテナ作成→公開)
+  db.ts                  D1へのリマインダー・Googleトークン・会話履歴・投稿済み求人のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
+  0004_threads_posted_jobs.sql threads_posted_jobsテーブルのスキーマ
 ```

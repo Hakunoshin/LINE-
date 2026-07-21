@@ -89,6 +89,29 @@ export async function saveGoogleAccessToken(
     .run();
 }
 
+export async function isJobPosted(db: D1Database, jobKey: string): Promise<boolean> {
+  const result = await db
+    .prepare("SELECT 1 FROM threads_posted_jobs WHERE job_key = ?")
+    .bind(jobKey)
+    .first<{ 1: number }>();
+  return result !== null;
+}
+
+export async function markJobPosted(
+  db: D1Database,
+  jobKey: string,
+  title: string,
+  mediaId: string | null
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO threads_posted_jobs (job_key, title, media_id) VALUES (?, ?, ?)
+       ON CONFLICT(job_key) DO NOTHING`
+    )
+    .bind(jobKey, title, mediaId)
+    .run();
+}
+
 export async function getAppState(db: D1Database, key: string): Promise<string | null> {
   const result = await db
     .prepare("SELECT value FROM app_state WHERE key = ?")
