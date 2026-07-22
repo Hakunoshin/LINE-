@@ -88,6 +88,21 @@ const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "求人投稿";
 
+// 「投稿テスト」コマンドで送る秘書通知のサンプル本文(実投稿はしない)。
+const SAMPLE_POST_TEXT = [
+  "未経験から挑戦できる不動産営業を発見👀",
+  "",
+  "🏢 株式会社サンプル",
+  "💰 想定年収 400〜1000万円",
+  "📍 東京(転勤なし)",
+  "",
+  "月給30万＋インセンティブ上限なし。研修が手厚く、他業種からの転職者が9割活躍中です。",
+  "",
+  "気になる方はお気軽にDMください📩",
+  "",
+  "#求人 #転職 #不動産",
+].join("\n");
+
 // CTA(DM誘導/コメント誘導)のA/Bテスト設定。
 const CTA_TYPES: CtaType[] = ["dm", "comment"];
 // 各CTAがこの件数(指標付き)に達するまではランダムに出して探索する。
@@ -104,6 +119,7 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・求人投稿  … 求人リストからランダムに1件を今すぐThreadsへ投稿",
+  "・投稿テスト  … 「投稿した体」の秘書通知だけを送る(Threadsには投稿しない)",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -291,6 +307,12 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     } catch (e) {
       return `テスト配信に失敗しました: ${(e as Error).message}`;
     }
+  }
+
+  if (trimmed === "投稿テスト" || trimmed === "通知テスト" || trimmed === "Threadsテスト") {
+    // 実際にはThreadsへ投稿せず、「投稿した体」の秘書通知だけを本番と同じ形式で送る。
+    await notifyOwnerOfPost(env, SAMPLE_POST_TEXT, "dm");
+    return "秘書からの投稿通知をテスト送信しました。この直後に届くメッセージが、実際の自動投稿時と同じ形式です(Threadsへの投稿はしていません)。";
   }
 
   if (trimmed === THREADS_POST_COMMAND || trimmed === "Threads投稿") {
