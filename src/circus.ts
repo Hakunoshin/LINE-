@@ -1,179 +1,99 @@
-// circus (circus-job.com) から求人情報を取得するヘルパー。
-// circus側のAPI仕様に依存しないよう、JSONを返すエンドポイントを環境変数で受け取り、
-// よくあるレスポンス形状(配列 / {jobs} / {data} / {results})を吸収して正規化する。
-//
-// 必要な設定:
-//   CIRCUS_JOBS_URL   … 求人一覧を返すJSONエンドポイントのURL
-//   CIRCUS_API_TOKEN  … (任意) Bearer認証トークン
+// circus(circus-job.com)の「公開求人URL」から求人内容を取得するヘルパー。
+// jobDetailPublicToken 付きのURLは、ページHTMLの __NEXT_DATA__ (Next.js) に
+// props.pageProps.publicJob.job としてフル求人データが埋め込まれているので、
+// ログインなしでサーバーサイドから取得・解析できる。
+
+// ページ本文からcircusの公開求人URL(トークン付き)を抽出する。
+const CIRCUS_URL_RE = /https?:\/\/circus-job\.com\/search\/\d+\?jobDetailPublicToken=[0-9a-fA-F-]+/g;
+
+export function extractCircusJobUrls(text: string): string[] {
+  const matches = text.match(CIRCUS_URL_RE) ?? [];
+  return [...new Set(matches)];
+}
 
 export interface CircusJob {
-  // 重複投稿を防ぐための安定したキー(idが無ければURL/タイトルから生成)
-  key: string;
+  id: string;
+  url: string;
   title: string;
   company: string;
+  annualSalary: string;
   location: string;
-  salary: string;
-  employmentType: string;
-  url: string;
   description: string;
+  appealingPoints: string;
+  benefitsNote: string;
 }
 
-// レスポンス中のフィールド名の揺れを吸収するためのエイリアス一覧。
-const FIELD_ALIASES: Record<keyof Omit<CircusJob, "key">, string[]> = {
-  title: ["title", "job_title", "name", "position", "求人タイトル", "職種"],
-  company: ["company", "company_name", "corporation", "企業名", "会社名"],
-  location: ["location", "work_location", "area", "prefecture", "勤務地"],
-  salary: ["salary", "annual_income", "income", "wage", "給与", "年収"],
-  employmentType: ["employment_type", "employmentType", "job_type", "雇用形態"],
-  url: ["url", "job_url", "detail_url", "link", "permalink"],
-  description: ["description", "detail", "body", "summary", "職務内容", "仕事内容"],
-};
+function asText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
 
-function pickString(row: Record<string, unknown>, aliases: string[]): string {
-  for (const key of aliases) {
-    const v = row[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    if (typeof v === "number") return String(v);
+// __NEXT_DATA__ 内の publicJob.job を正規化する。
+function toCircusJob(url: string, job: Record<string, unknown>): CircusJob {
+  const company = job.company as Record<string, unknown> | undefined;
+  const salary = job.expectedAnnualSalary as { min?: number; max?: number } | undefined;
+
+  let annualSalary = "";
+  if (salary && (salary.min != null || salary.max != null)) {
+    if (salary.min != null && salary.max != null) annualSalary = `${salary.min}〜${salary.max}万円`;
+    else annualSalary = `${salary.min ?? salary.max}万円〜`;
   }
-  return "";
-}
 
-function extractArray(data: unknown): Record<string, unknown>[] {
-  if (Array.isArray(data)) return data as Record<string, unknown>[];
-  if (data && typeof data === "object") {
-    for (const key of ["jobs", "data", "results", "items", "求人"]) {
-      const v = (data as Record<string, unknown>)[key];
-      if (Array.isArray(v)) return v as Record<string, unknown>[];
-    }
-  }
-  return [];
-}
+  // 勤務地: 詳細住所があれば冒頭を、無ければ勤務地コメントを使う。
+  const location = asText(job.addressDetail) || asText(job.locationComments);
 
-function toJob(row: Record<string, unknown>): CircusJob {
-  const job: Omit<CircusJob, "key"> = {
-    title: pickString(row, FIELD_ALIASES.title),
-    company: pickString(row, FIELD_ALIASES.company),
-    location: pickString(row, FIELD_ALIASES.location),
-    salary: pickString(row, FIELD_ALIASES.salary),
-    employmentType: pickString(row, FIELD_ALIASES.employmentType),
-    url: pickString(row, FIELD_ALIASES.url),
-    description: pickString(row, FIELD_ALIASES.description),
+  return {
+    id: String(job.id ?? ""),
+    url,
+    title: asText(job.name),
+    company: asText(company?.name),
+    annualSalary,
+    location,
+    description: asText(job.jobDescriptions),
+    appealingPoints: asText(job.appealingPoints),
+    benefitsNote: asText(job.payAndBenefits) || asText(job.otherBenefits),
   };
-
-  // 重複判定用のキー: id系フィールド優先、無ければURL、それも無ければ会社名+タイトル
-  const idValue = pickString(row, ["id", "job_id", "uuid", "code", "求人ID"]);
-  const key = idValue || job.url || `${job.company}｜${job.title}`;
-
-  return { key, ...job };
 }
 
-/** 求人をThreads投稿用のテキストに整形する。長すぎる説明文は投稿側で丸められる。 */
-export function formatCircusJobPost(job: CircusJob): string {
-  const lines = [`【新着求人】${job.title}`];
-  if (job.company) lines.push(`🏢 ${job.company}`);
-  if (job.location) lines.push(`📍 ${job.location}`);
-  if (job.salary) lines.push(`💰 ${job.salary}`);
-  if (job.employmentType) lines.push(`🕒 ${job.employmentType}`);
-
-  if (job.description) {
-    lines.push("");
-    lines.push(job.description);
-  }
-  if (job.url) {
-    lines.push("");
-    lines.push(`▶ 詳細・ご応募はこちら`);
-    lines.push(job.url);
-  }
-  lines.push("");
-  lines.push("#求人 #転職 #キャリア");
-  return lines.join("\n");
-}
-
-// ログイン後に得られる認証情報。Cookieセッション or Bearerトークンのどちらか(両方でも可)。
-export interface CircusAuth {
-  cookie?: string;
-  bearer?: string;
-}
-
-function pickToken(data: Record<string, unknown>): string | undefined {
-  for (const key of ["token", "access_token", "accessToken", "jwt", "id_token", "authToken"]) {
-    const v = data[key];
-    if (typeof v === "string" && v) return v;
-  }
-  // { data: { token } } のようにネストしている場合も1段だけ探索する
-  const nested = data.data;
-  if (nested && typeof nested === "object") return pickToken(nested as Record<string, unknown>);
-  return undefined;
-}
-
-/**
- * circusにメールアドレス+パスワードでログインし、以降のリクエストに使う認証情報を返す。
- * レスポンスがSet-Cookie(セッション)でもJSON中のトークンでも受け取れるようにしている。
- *
- * NOTE: circusの実際のログインAPIの仕様(リクエストのフィールド名・レスポンス形式)に合わせて
- * 調整が必要になる場合があります。既定ではJSON {email, password} をPOSTします。
- */
-export async function circusLogin(loginUrl: string, email: string, password: string): Promise<CircusAuth> {
-  const res = await fetch(loginUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ email, password }),
-    redirect: "manual",
+/** 公開求人URLを取得し、求人内容を解析して返す。取得/解析できなければ例外を投げる。 */
+export async function fetchCircusPublicJob(url: string): Promise<CircusJob> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" },
   });
-
-  if (res.status >= 400) {
-    throw new Error(`circus login failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    throw new Error(`circus fetch error: ${res.status}`);
+  }
+  const html = await res.text();
+  const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) {
+    throw new Error("求人データ(__NEXT_DATA__)が見つかりませんでした");
   }
 
-  const auth: CircusAuth = {};
-
-  // Set-Cookieからセッションクッキーを拾う。複数CookieはgetSetCookie()で取得できる環境を優先。
-  const getSetCookie = (res.headers as { getSetCookie?: () => string[] }).getSetCookie;
-  const rawSetCookie = res.headers.get("set-cookie");
-  const setCookies: string[] =
-    typeof getSetCookie === "function"
-      ? getSetCookie.call(res.headers)
-      : rawSetCookie
-        ? [rawSetCookie]
-        : [];
-  const cookiePairs = setCookies
-    .map((c: string) => c.split(";")[0].trim())
-    .filter(Boolean);
-  if (cookiePairs.length > 0) auth.cookie = cookiePairs.join("; ");
-
-  // JSONボディにトークンがあれば拾う(ボディは一度しか読めないのでtextで受けてからparse)
-  const bodyText = await res.text();
-  if (bodyText) {
-    try {
-      const data = JSON.parse(bodyText) as Record<string, unknown>;
-      const token = pickToken(data);
-      if (token) auth.bearer = token;
-    } catch {
-      // JSONでなければトークンは無い(Cookie方式)とみなす
-    }
+  let data: unknown;
+  try {
+    data = JSON.parse(m[1]);
+  } catch {
+    throw new Error("求人データのJSON解析に失敗しました");
   }
 
-  if (!auth.cookie && !auth.bearer) {
-    throw new Error(
-      "circusログインでセッション情報(Cookie/トークン)を取得できませんでした。ログインAPIのレスポンス形式の確認が必要です。"
-    );
+  const job = (data as { props?: { pageProps?: { publicJob?: { job?: Record<string, unknown> } } } })
+    ?.props?.pageProps?.publicJob?.job;
+  if (!job || Object.keys(job).length === 0) {
+    throw new Error("この求人は公開されていません(公開トークンが無効/期限切れの可能性)");
   }
-  return auth;
+  return toCircusJob(url, job);
 }
 
-/** circusのエンドポイントから求人一覧を取得して正規化する。認証はBearer/Cookieのどちらでも可。 */
-export async function fetchCircusJobs(url: string, auth?: CircusAuth): Promise<CircusJob[]> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (auth?.bearer) headers.Authorization = `Bearer ${auth.bearer}`;
-  if (auth?.cookie) headers.Cookie = auth.cookie;
-
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    throw new Error(`circus API error: ${res.status} ${await res.text()}`);
-  }
-  const data = (await res.json()) as unknown;
-  return extractArray(data)
-    .map(toJob)
-    // タイトルとキーが無い行は投稿できないので除外する
-    .filter((job) => job.key && job.title);
+/** 求人をClaudeに渡す/フォールバック整形するためのテキストにまとめる。 */
+export function circusJobToText(job: CircusJob): string {
+  return [
+    `職種: ${job.title}`,
+    job.company && `企業: ${job.company}`,
+    job.annualSalary && `想定年収: ${job.annualSalary}`,
+    job.location && `勤務地: ${job.location}`,
+    job.appealingPoints && `アピールポイント:\n${job.appealingPoints}`,
+    job.description && `仕事内容:\n${job.description}`,
+    job.benefitsNote && `待遇・福利厚生:\n${job.benefitsNote}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

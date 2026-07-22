@@ -34,15 +34,16 @@ Googleアカウントと連携すると、以下が使えるようになりま�
 
 カレンダーは読み取りのみ、ToDoはGoogle Tasksとの読み書きです（カレンダーへの書き込みは行いません）。
 
-### 求人票のThreads自動投稿（任意）
+### 求人のThreads自動投稿（任意）
 
-LINEで登録した求人票のプールから、毎日ランダムに1件を選んで [Threads](https://www.threads.net/) へ自動投稿します。
+circusの「公開求人URL」（`jobDetailPublicToken` 付きURL）のリストから、毎日ランダムに1件を選んで [Threads](https://www.threads.net/) へ自動投稿します。
 
-- **求人票はLINEから登録**: `求人追加 <求人票の本文>` でプールに追加。`求人リスト` で一覧、`求人削除 <ID>` で削除
-- 毎日決まったJST時刻（デフォルト `09:00,15:00,21:00` の1日3回、`THREADS_AUTOPOST_TIME_JST` にカンマ区切りで指定して変更可）に、プールからランダムに1件投稿（直前と同じ求人は避けます）
-- **投稿文はClaudeが生成**（`ANTHROPIC_API_KEY` 設定時）。後述の分析結果を踏まえて「伸びる型」に寄せて作文します。未設定時は求人票本文をそのまま整形して投稿します
+- **投稿対象は求人URLで指定**: `src/jobs.ts` の `DEFAULT_JOB_URLS` にURLを列挙（編集して再デプロイで反映）。または環境変数 `JOBS_PAGE_URL` に「URLを書いた外部ページ」を設定すると、そのページからcircusの公開URLを自動抽出します（こちらが優先）
+- 公開URLの求人内容（職種・企業名・想定年収・勤務地・仕事内容・アピールポイント等）はWorkerがcircusから取得します（ログイン不要）
+- 毎日決まったJST時刻（デフォルト `09:00,15:00,21:00` の1日3回、`THREADS_AUTOPOST_TIME_JST` にカンマ区切りで指定して変更可）に、リストからランダムに1件投稿（直前と同じ求人は避けます）
+- **投稿文はClaudeが生成**（`ANTHROPIC_API_KEY` 設定時）。後述の分析結果を踏まえて「伸びる型」に寄せて作文します。未設定時は求人内容をそのまま整形して投稿します
 - **投稿するたびに、LINEの秘書から「この求人をThreadsに投稿しました🧵」と投稿本文つきで通知**が届きます
-- LINEで `求人投稿` と送ると、その場でプールから1件投稿できます（動作確認用）
+- LINEで `求人投稿` と送ると、その場でリストから1件投稿できます（動作確認用）
 
 #### パフォーマンス分析→改善ループ
 
@@ -71,7 +72,11 @@ npx wrangler secret put THREADS_APP_SECRET   # Threads App Secret
 
 > 手動発行した長期トークンを直接使う場合は、代わりに `THREADS_USER_ID` と `THREADS_ACCESS_TOKEN` を secret に設定します（この場合、自動refreshは行われないため60日ごとに手動更新が必要です）。
 
-> `src/circus.ts` はcircusから求人を取得する実装ですが、現在の自動投稿フローでは使用していません（将来circus連携する場合の土台として残しています）。
+##### 求人URLの用意
+
+circusの求人ページで「公開URL（シェア用リンク）」を発行すると `?jobDetailPublicToken=...` 付きのURLになります。
+このURLはログイン不要で求人内容を含むため、Workerが取得して投稿文を生成できます。
+これらのURLを `src/jobs.ts` に列挙するか、外部ページにまとめて `JOBS_PAGE_URL` に設定してください。
 
 ### AI応答（任意）
 
@@ -187,14 +192,13 @@ src/
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
   threads.ts             Threads Graph API(投稿・OAuth・トークンrefresh・インサイト)
   threadsContent.ts      Claudeによる投稿文生成とパフォーマンス分析
-  circus.ts              circus求人取得(現在の自動投稿フローでは未使用。将来用に保持)
-  db.ts                  D1へのリマインダー・トークン・会話履歴・求人プール・投稿指標のCRUD
+  circus.ts              circus公開求人URLの取得・__NEXT_DATA__解析・正規化
+  jobs.ts                投稿対象のcircus公開求人URLリスト(DEFAULT_JOB_URLS)
+  db.ts                  D1へのリマインダー・トークン・会話履歴・投稿指標のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
-  0004_threads_posted_jobs.sql threads_posted_jobsテーブルのスキーマ(circus用・未使用)
-  0005_threads_oauth_and_metrics.sql  threads_tokens / threads_post_metricsテーブルのスキーマ
-  0006_job_pool.sql      job_pool(求人票プール)テーブルのスキーマ
+  0004_threads_oauth_and_metrics.sql  threads_tokens / threads_post_metricsテーブルのスキーマ
 ```

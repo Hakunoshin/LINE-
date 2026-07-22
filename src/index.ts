@@ -8,11 +8,6 @@ import {
   markNotified,
   getAppState,
   setAppState,
-  addJobToPool,
-  listActiveJobPool,
-  countActiveJobPool,
-  getRandomActiveJob,
-  deactivateJobFromPool,
   insertPostMetric,
   updatePostMetric,
   listRecentPostMetrics,
@@ -37,6 +32,8 @@ import {
   type ThreadsConfig,
 } from "./threads";
 import { generateThreadsPostFromText, formatRawJobPost, analyzePerformance } from "./threadsContent";
+import { fetchCircusPublicJob, extractCircusJobUrls, circusJobToText } from "./circus";
+import { DEFAULT_JOB_URLS } from "./jobs";
 
 export interface Env {
   DB: D1Database;
@@ -52,7 +49,10 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式のカンマ区切り)。未設定なら DEFAULT_DIGEST_TIMES。
   DAILY_DIGEST_TIME_JST?: string;
-  // --- 求人票プール → Threads自動投稿 ---
+  // --- 求人(circus公開URL) → Threads自動投稿 ---
+  // 投稿対象の求人URLを載せた外部ページのURL(任意)。設定するとそのページ本文から
+  // circusの公開URLを自動抽出して使う。未設定なら src/jobs.ts の DEFAULT_JOB_URLS を使う。
+  JOBS_PAGE_URL?: string;
   // Threads OAuthアプリ。設定すると /threads/start で連携でき、トークンを自動refreshする。
   THREADS_APP_ID?: string;
   THREADS_APP_SECRET?: string;
@@ -81,15 +81,11 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
-// 求人票プール → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回、各回ランダムに1件。
+// 求人(circus公開URL) → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回、各回ランダムに1件。
 const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
 // 投稿指標の収集+分析を回す時刻(1日1回)。
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "求人投稿";
-const JOB_ADD_COMMAND = "求人追加";
-const JOB_LIST_COMMAND = "求人リスト";
-const JOB_DELETE_COMMAND = "求人削除";
-const JOB_LABEL_MAX = 40;
 
 const HELP_TEXT = [
   "使えるコマンド:",
@@ -99,10 +95,7 @@ const HELP_TEXT = [
   "・一覧  … 未通知のリマインダーを表示",
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
-  "・求人追加 <求人票本文>  … Threadsに回す求人票をプールに登録",
-  "・求人リスト  … 登録中の求人票を表示",
-  "・求人削除 <ID>  … 求人票をプールから削除",
-  "・求人投稿  … プールからランダムに1件を今すぐThreadsへ投稿",
+  "・求人投稿  … 求人リストからランダムに1件を今すぐThreadsへ投稿",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -292,40 +285,7 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
   }
 
-  if (trimmed === JOB_ADD_COMMAND || trimmed.startsWith(`${JOB_ADD_COMMAND} `) || trimmed.startsWith(`${JOB_ADD_COMMAND}\n`)) {
-    const content = trimmed.slice(JOB_ADD_COMMAND.length).trim();
-    if (!content) {
-      return `求人票の本文を続けて送ってください。例:\n${JOB_ADD_COMMAND} ○○株式会社 / Webエンジニア / 年収600〜900万 / フルリモート ...`;
-    }
-    const firstLine = content.split("\n")[0].trim();
-    const label = firstLine.length > JOB_LABEL_MAX ? firstLine.slice(0, JOB_LABEL_MAX) + "…" : firstLine;
-    const id = await addJobToPool(env.DB, label, content);
-    const count = await countActiveJobPool(env.DB);
-    return `求人票をプールに登録しました。\n#${id} ${label}\n(現在の登録数: ${count}件)`;
-  }
-
-  if (trimmed === JOB_LIST_COMMAND) {
-    const jobs = await listActiveJobPool(env.DB);
-    if (jobs.length === 0) {
-      return `登録中の求人票はありません。「${JOB_ADD_COMMAND} <本文>」で追加できます。`;
-    }
-    return [`登録中の求人票 (${jobs.length}件):`, ...jobs.map((j) => `#${j.id} ${j.label}`)].join("\n");
-  }
-
-  if (trimmed.startsWith(JOB_DELETE_COMMAND)) {
-    const idStr = trimmed.slice(JOB_DELETE_COMMAND.length).trim();
-    const id = Number(idStr);
-    if (!idStr || Number.isNaN(id)) {
-      return `削除する求人票のIDを指定してください。例: ${JOB_DELETE_COMMAND} 3`;
-    }
-    const deleted = await deactivateJobFromPool(env.DB, id);
-    return deleted ? `#${id} を求人プールから削除しました。` : `#${id} は見つかりませんでした。`;
-  }
-
   if (trimmed === THREADS_POST_COMMAND || trimmed === "Threads投稿") {
-    if ((await countActiveJobPool(env.DB)) === 0) {
-      return `求人票が未登録です。「${JOB_ADD_COMMAND} <本文>」で登録してください。`;
-    }
     if (!isThreadsConfigured(env)) {
       return `Threadsが未連携です。${baseUrl}/threads/start から連携してください。`;
     }
@@ -581,7 +541,23 @@ interface PostResult {
   error?: string;
 }
 
-// 求人票プールからランダムに1件選び、投稿文を生成してThreadsへ投稿する。
+// 投稿対象の求人URL一覧を返す。JOBS_PAGE_URLがあればそのページから抽出、無ければ既定リスト。
+async function getJobUrls(env: Env): Promise<string[]> {
+  if (env.JOBS_PAGE_URL) {
+    try {
+      const res = await fetch(env.JOBS_PAGE_URL, { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (res.ok) {
+        const urls = extractCircusJobUrls(await res.text());
+        if (urls.length > 0) return urls;
+      }
+    } catch {
+      // 取得失敗時は既定リストにフォールバック
+    }
+  }
+  return DEFAULT_JOB_URLS;
+}
+
+// 求人URLリストからランダムに1件選び、circusから内容を取得して投稿文を生成、Threadsへ投稿する。
 // 投稿文はClaudeが「これまで伸びた傾向(learnings)」を踏まえて生成し、
 // 投稿本文は分析用にthreads_post_metricsへ記録する。
 async function postRandomJobToThreads(env: Env): Promise<PostResult> {
@@ -590,29 +566,42 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
     return { error: "Threads未連携です。/threads/start から連携してください。" };
   }
 
-  // 直前に投稿した求人は(他に候補があれば)避けて、連続同一投稿を防ぐ。
-  const lastIdRaw = await getAppState(env.DB, "last_posted_job_id");
-  const lastId = lastIdRaw ? Number(lastIdRaw) : undefined;
-  const job = await getRandomActiveJob(env.DB, Number.isNaN(lastId as number) ? undefined : lastId);
-  if (!job) {
-    return { error: "投稿できる求人票がありません(プールが空です)。" };
+  const urls = await getJobUrls(env);
+  if (urls.length === 0) {
+    return { error: "投稿できる求人URLがありません(src/jobs.ts または JOBS_PAGE_URL を設定してください)。" };
   }
 
-  // 「伸びる型」の分析メモを反映して投稿文を生成(APIキーが無ければ本文を丸めて使う)。
+  // 直前に投稿したURLは(他に候補があれば)避けて、連続同一投稿を防ぐ。
+  const lastUrl = await getAppState(env.DB, "last_posted_job_url");
+  const candidates = urls.length > 1 ? urls.filter((u) => u !== lastUrl) : urls;
+  const url = candidates[Math.floor(Math.random() * candidates.length)];
+
+  // circusの公開URLから求人内容を取得する。
+  let jobText: string;
+  let jobId: string;
+  try {
+    const job = await fetchCircusPublicJob(url);
+    jobText = circusJobToText(job);
+    jobId = job.id || url;
+  } catch (e) {
+    return { error: `求人取得に失敗: ${(e as Error).message}` };
+  }
+
+  // 「伸びる型」の分析メモを反映して投稿文を生成(APIキーが無ければ内容を丸めて使う)。
   const learnings = await getAppState(env.DB, "threads_post_learnings");
-  let text = formatRawJobPost(job.content);
+  let text = formatRawJobPost(jobText);
   if (env.ANTHROPIC_API_KEY) {
     try {
-      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, job.content, learnings);
+      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings);
     } catch {
-      text = formatRawJobPost(job.content);
+      text = formatRawJobPost(jobText);
     }
   }
 
   try {
     const mediaId = await postThreadsText(threads, text);
-    await insertPostMetric(env.DB, mediaId, `pool:${job.id}`, text);
-    await setAppState(env.DB, "last_posted_job_id", String(job.id));
+    await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text);
+    await setAppState(env.DB, "last_posted_job_url", url);
     return { postedText: text };
   } catch (e) {
     return { error: `投稿に失敗: ${(e as Error).message}` };
@@ -636,13 +625,12 @@ async function notifyOwnerOfPost(env: Env, text: string): Promise<void> {
   await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, message);
 }
 
-// 求人票プールからランダムに1件Threadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
+// 求人URLリストからランダムに1件Threadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
 async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
   const now = new Date();
   const nowHm = currentJstHm(now);
   if (!getThreadsAutopostTimes(env).includes(nowHm)) return;
   if (!isThreadsConfigured(env)) return; // 未連携なら何もしない
-  if ((await countActiveJobPool(env.DB)) === 0) return; // 求人票が無ければ何もしない
 
   // 「日付+時刻」単位で送信済みを記録し、同じ時刻枠での二重投稿(cron再試行等)を防ぐ。
   const slotKey = `${jstDateKey(now)} ${nowHm}`;
