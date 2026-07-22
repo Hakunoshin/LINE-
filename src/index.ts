@@ -12,6 +12,7 @@ import {
   updatePostMetric,
   listRecentPostMetrics,
   listTopPostMetrics,
+  getCtaStats,
 } from "./db";
 import { parseReminderInput, formatJstDateTime, currentJstHm, jstDateKey, jstTodayRangeUtc, jstTomorrowRangeUtc, jstDateOnlyUtc } from "./dateParser";
 import {
@@ -31,7 +32,7 @@ import {
   getThreadsInsights,
   type ThreadsConfig,
 } from "./threads";
-import { generateThreadsPostFromText, formatRawJobPost, analyzePerformance } from "./threadsContent";
+import { generateThreadsPostFromText, formatRawJobPost, analyzePerformance, type CtaType } from "./threadsContent";
 import { fetchCircusPublicJob, extractCircusJobUrls, circusJobToText } from "./circus";
 import { DEFAULT_JOB_URLS } from "./jobs";
 
@@ -86,6 +87,13 @@ const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
 // 投稿指標の収集+分析を回す時刻(1日1回)。
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "求人投稿";
+
+// CTA(DM誘導/コメント誘導)のA/Bテスト設定。
+const CTA_TYPES: CtaType[] = ["dm", "comment"];
+// 各CTAがこの件数(指標付き)に達するまではランダムに出して探索する。
+const CTA_MIN_SAMPLES = 3;
+// 探索率: この確率で勝ってる方でなくランダムに選ぶ(ε-greedy)。
+const CTA_EPSILON = 0.25;
 
 const HELP_TEXT = [
   "使えるコマンド:",
@@ -291,7 +299,8 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
     const result = await postRandomJobToThreads(env);
     if (result.postedText) {
-      return `Threadsに投稿しました。\n\n${result.postedText}`;
+      const cta = result.cta ? ` (導線: ${ctaLabel(result.cta)})` : "";
+      return `Threadsに投稿しました。${cta}\n\n${result.postedText}`;
     }
     return `投稿できませんでした: ${result.error ?? "不明なエラー"}`;
   }
@@ -538,7 +547,35 @@ async function resolveThreadsConfig(env: Env): Promise<ThreadsConfig | null> {
 
 interface PostResult {
   postedText?: string;
+  cta?: CtaType;
   error?: string;
+}
+
+function randomCta(): CtaType {
+  return CTA_TYPES[Math.floor(Math.random() * CTA_TYPES.length)];
+}
+
+// どちらのCTAを使うかをε-greedyで決める。
+// 各CTAが十分なサンプルを持つまではランダム(探索)、揃ったら平均エンゲージメントが高い方を
+// 確率(1-ε)で採用し、εの確率では引き続きランダムに探索する。
+async function chooseCta(env: Env): Promise<CtaType> {
+  const stats = await getCtaStats(env.DB);
+  const byType = new Map(stats.map((s) => [s.cta_type, s]));
+  const enough = CTA_TYPES.every((t) => (byType.get(t)?.n ?? 0) >= CTA_MIN_SAMPLES);
+  if (!enough || Math.random() < CTA_EPSILON) {
+    return randomCta();
+  }
+  // 平均エンゲージメントが高い方を採用。
+  let best: CtaType = CTA_TYPES[0];
+  let bestAvg = -1;
+  for (const t of CTA_TYPES) {
+    const avg = byType.get(t)?.avg_engagement ?? 0;
+    if (avg > bestAvg) {
+      bestAvg = avg;
+      best = t;
+    }
+  }
+  return best;
 }
 
 // 投稿対象の求人URL一覧を返す。JOBS_PAGE_URLがあればそのページから抽出、無ければ既定リスト。
@@ -587,22 +624,25 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
     return { error: `求人取得に失敗: ${(e as Error).message}` };
   }
 
+  // A/Bテストで今回のCTA(DM誘導 or コメント誘導)を決める。
+  const cta = await chooseCta(env);
+
   // 「伸びる型」の分析メモを反映して投稿文を生成(APIキーが無ければ内容を丸めて使う)。
   const learnings = await getAppState(env.DB, "threads_post_learnings");
-  let text = formatRawJobPost(jobText);
+  let text = formatRawJobPost(jobText, cta);
   if (env.ANTHROPIC_API_KEY) {
     try {
-      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings);
+      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings, cta);
     } catch {
-      text = formatRawJobPost(jobText);
+      text = formatRawJobPost(jobText, cta);
     }
   }
 
   try {
     const mediaId = await postThreadsText(threads, text);
-    await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text);
+    await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text, cta);
     await setAppState(env.DB, "last_posted_job_url", url);
-    return { postedText: text };
+    return { postedText: text, cta };
   } catch (e) {
     return { error: `投稿に失敗: ${(e as Error).message}` };
   }
@@ -617,12 +657,20 @@ function getThreadsAutopostTimes(env: Env): string[] {
     .filter(Boolean);
 }
 
-// 投稿結果を「秘書からの報告」としてLINEに通知する。投稿本文もそのまま添える。
-async function notifyOwnerOfPost(env: Env, text: string): Promise<void> {
+function ctaLabel(cta?: CtaType): string {
+  if (cta === "dm") return "DM誘導";
+  if (cta === "comment") return "コメント誘導";
+  return "";
+}
+
+// 投稿結果を「秘書からの報告」としてLINEに通知する。投稿本文と今回の導線(CTA)も添える。
+async function notifyOwnerOfPost(env: Env, text: string, cta?: CtaType): Promise<void> {
   const target = await getPushTargetUserId(env);
   if (!target) return;
-  const message = ["秘書です。以下の求人をThreadsに投稿しました🧵", "", text].join("\n");
-  await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, message);
+  const header = cta
+    ? `秘書です。以下の求人をThreadsに投稿しました🧵 (導線: ${ctaLabel(cta)})`
+    : "秘書です。以下の求人をThreadsに投稿しました🧵";
+  await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, [header, "", text].join("\n"));
 }
 
 // 求人URLリストからランダムに1件Threadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
@@ -643,7 +691,7 @@ async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
     return;
   }
   await setAppState(env.DB, "last_threads_autopost_slot", slotKey);
-  await notifyOwnerOfPost(env, result.postedText);
+  await notifyOwnerOfPost(env, result.postedText, result.cta);
 }
 
 function getThreadsInsightsTime(env: Env): string {

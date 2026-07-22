@@ -137,21 +137,44 @@ export interface PostMetric {
   quotes: number;
   posted_at: string;
   metrics_updated_at: string | null;
+  cta_type: string | null;
 }
 
 export async function insertPostMetric(
   db: D1Database,
   mediaId: string,
   jobKey: string,
-  text: string
+  text: string,
+  ctaType: string
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO threads_post_metrics (media_id, job_key, text) VALUES (?, ?, ?)
+      `INSERT INTO threads_post_metrics (media_id, job_key, text, cta_type) VALUES (?, ?, ?, ?)
        ON CONFLICT(media_id) DO NOTHING`
     )
-    .bind(mediaId, jobKey, text)
+    .bind(mediaId, jobKey, text, ctaType)
     .run();
+}
+
+// CTA種別ごとの投稿数と平均エンゲージメント(いいね+返信+リポスト+引用)。A/B判定に使う。
+export interface CtaStat {
+  cta_type: string;
+  n: number;
+  avg_engagement: number;
+}
+
+export async function getCtaStats(db: D1Database): Promise<CtaStat[]> {
+  const result = await db
+    .prepare(
+      `SELECT cta_type,
+              COUNT(*) AS n,
+              AVG(likes + replies + reposts + quotes) AS avg_engagement
+       FROM threads_post_metrics
+       WHERE metrics_updated_at IS NOT NULL AND cta_type IS NOT NULL
+       GROUP BY cta_type`
+    )
+    .all<CtaStat>();
+  return result.results ?? [];
 }
 
 export interface PostInsightValues {
