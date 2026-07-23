@@ -83,11 +83,13 @@ export async function fetchCircusPublicJob(url: string): Promise<CircusJob> {
   return toCircusJob(url, job);
 }
 
-/** 求人をClaudeに渡す/フォールバック整形するためのテキストにまとめる。 */
+/**
+ * 求人をClaudeに渡す/フォールバック整形するためのテキストにまとめる。
+ * 企業名は投稿に出さない方針のため、ここには含めない(タイトル等に混ざる企業名は生成側で匿名化する)。
+ */
 export function circusJobToText(job: CircusJob): string {
   return [
     `職種: ${job.title}`,
-    job.company && `企業: ${job.company}`,
     job.annualSalary && `想定年収: ${job.annualSalary}`,
     job.location && `勤務地: ${job.location}`,
     job.appealingPoints && `アピールポイント:\n${job.appealingPoints}`,

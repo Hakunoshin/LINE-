@@ -92,11 +92,10 @@ const THREADS_POST_COMMAND = "求人投稿";
 const SAMPLE_POST_TEXT = [
   "未経験から挑戦できる不動産営業を発見👀",
   "",
-  "🏢 株式会社サンプル",
   "💰 想定年収 400〜1000万円",
   "📍 東京(転勤なし)",
   "",
-  "月給30万＋インセンティブ上限なし。研修が手厚く、他業種からの転職者が9割活躍中です。",
+  "月給30万＋インセンティブ上限なし。研修が手厚く、他業種からの転職者が9割活躍中です。上場グループの安定基盤◎",
   "",
   "気になる方はお気軽にDMください📩",
   "",
@@ -638,10 +637,12 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
   // circusの公開URLから求人内容を取得する。
   let jobText: string;
   let jobId: string;
+  let company = "";
   try {
     const job = await fetchCircusPublicJob(url);
     jobText = circusJobToText(job);
     jobId = job.id || url;
+    company = job.company;
   } catch (e) {
     return { error: `求人取得に失敗: ${(e as Error).message}` };
   }
@@ -650,11 +651,12 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
   const cta = await chooseCta(env);
 
   // 「伸びる型」の分析メモを反映して投稿文を生成(APIキーが無ければ内容を丸めて使う)。
+  // 企業名は投稿に出さない方針なので、企業名を禁止ワードとして渡す。
   const learnings = await getAppState(env.DB, "threads_post_learnings");
   let text = formatRawJobPost(jobText, cta);
   if (env.ANTHROPIC_API_KEY) {
     try {
-      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings, cta);
+      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings, cta, company);
     } catch {
       text = formatRawJobPost(jobText, cta);
     }

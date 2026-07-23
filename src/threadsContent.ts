@@ -43,7 +43,8 @@ export async function generateThreadsPostFromText(
   apiKey: string,
   jobText: string,
   learnings: string | null,
-  cta: CtaType
+  cta: CtaType,
+  bannedCompany?: string
 ): Promise<string> {
   const system = [
     "あなたはThreadsで求人情報を発信する、SNS運用のプロの編集者です。",
@@ -53,11 +54,17 @@ export async function generateThreadsPostFromText(
     `- 全体で${THREADS_TEXT_LIMIT}文字以内。日本語。プレーンテキスト(Markdown記法は使わない)。`,
     "- 冒頭1行で目を引くフック。改行と絵文字は適度に使い、読みやすく。",
     "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
+    "- 企業名・会社名は本文に一切出さないこと。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
+    bannedCompany
+      ? `- 特に「${bannedCompany}」という固有名詞は絶対に本文に含めない。`
+      : "",
     "- 求人票中にURLがあれば本文にそのまま含める。",
     `- ${CTA_INSTRUCTION[cta]}`,
     "- CTAの直後に関連ハッシュタグを3〜5個。",
     "- 出力は投稿本文のみ。前置き・説明・コードブロックは不要。",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const userParts = [`# 求人票\n${jobText.trim()}`];
   if (learnings && learnings.trim()) {
