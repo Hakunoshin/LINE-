@@ -223,8 +223,21 @@ app.post("/webhook", async (c) => {
 
     const text = event.message.text ?? "";
     const baseUrl = new URL(c.req.url).origin;
-    const reply = await handleCommand(c.env, userId, text, baseUrl);
-    await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
+    // 1イベントの処理でエラーが出ても無言で落とさず、エラー内容を返信する。
+    try {
+      const reply = await handleCommand(c.env, userId, text, baseUrl);
+      await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
+    } catch (e) {
+      try {
+        await replyText(
+          c.env.LINE_CHANNEL_ACCESS_TOKEN,
+          event.replyToken,
+          `エラーが発生しました: ${(e as Error).message}`
+        );
+      } catch {
+        // 返信自体が失敗した場合は諦める(cronの再試行等には影響しない)
+      }
+    }
   }
 
   return c.text("ok");
