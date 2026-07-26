@@ -19,6 +19,7 @@ import {
   insertTask,
 } from "./google";
 import { handleWithAi } from "./ai";
+import { getTodayWeather } from "./weather";
 
 export interface Env {
   DB: D1Database;
@@ -34,6 +35,10 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   // 毎日ダイジェストを送る時刻 (JST, "HH:MM"形式のカンマ区切り)。未設定なら DEFAULT_DIGEST_TIMES。
   DAILY_DIGEST_TIME_JST?: string;
+  // 朝の配信に付ける天気の地点(未設定なら東京)
+  WEATHER_LATITUDE?: string;
+  WEATHER_LONGITUDE?: string;
+  WEATHER_LOCATION_NAME?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -208,9 +213,11 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
       return `Googleと連携されていません。\n${baseUrl}/oauth/start から連携してください。`;
     }
     try {
-      const digest = await buildTodayDigest(accessToken);
+      let digest = await buildTodayDigest(accessToken);
+      const weather = await getTodayWeatherLine(env);
+      if (weather) digest = `${weather}\n\n${digest}`;
       await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, userId, digest);
-      return "テスト配信をプッシュ送信しました。この直後に届く別メッセージが自動配信と同じ形式です。";
+      return "テスト配信をプッシュ送信しました。この直後に届く別メッセージが朝の自動配信と同じ形式です。";
     } catch (e) {
       return `テスト配信に失敗しました: ${(e as Error).message}`;
     }
@@ -318,11 +325,29 @@ async function runDailyDigestIfDue(env: Env): Promise<void> {
   if (!accessToken) return; // 未連携ならダイジェストは送らない
 
   try {
-    const digest = await buildTodayDigest(accessToken);
+    let digest = await buildTodayDigest(accessToken);
+    // 朝(07:30)の配信にだけ今日の天気を付ける
+    if (nowHm === PROPOSAL_PREP_TIME_JST) {
+      const weather = await getTodayWeatherLine(env);
+      if (weather) digest = `${weather}\n\n${digest}`;
+    }
     await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, digest);
     await setAppState(env.DB, "last_digest_sent_at", sentKey);
   } catch {
     // 取得失敗時は次の分に自然に再試行される(state未更新のため)
+  }
+}
+
+// 環境変数から天気地点を解決して今日の天気を1行取得(既定は東京)
+async function getTodayWeatherLine(env: Env): Promise<string | null> {
+  const latitude = Number(env.WEATHER_LATITUDE ?? "35.6895");
+  const longitude = Number(env.WEATHER_LONGITUDE ?? "139.6917");
+  const locationName = env.WEATHER_LOCATION_NAME ?? "東京";
+  try {
+    const line = await getTodayWeather({ latitude, longitude, locationName });
+    return line ? `🌦️ 今日の天気 ${line}` : null;
+  } catch {
+    return null;
   }
 }
 

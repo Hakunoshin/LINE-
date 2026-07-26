@@ -14,3 +14,7 @@ crons = ["* * * * *"]
 [vars]
 # 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式のカンマ区切りで複数指定可。
 DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
+# 朝の配信に付ける天気の地点(既定: 東京)。緯度・経度・表示名。
+WEATHER_LATITUDE = "35.6895"
+WEATHER_LONGITUDE = "139.6917"
+WEATHER_LOCATION_NAME = "東京"
