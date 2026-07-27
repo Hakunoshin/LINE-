@@ -20,6 +20,6 @@ DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
 # 求人(circus公開URL) → Threads自動投稿の実行時刻(JST, カンマ区切り)。各回リストからランダムに1件投稿。
 # 投稿対象URLは src/jobs.ts か、外部ページを指す JOBS_PAGE_URL(secret) で指定する。
 # THREADS_APP_ID / THREADS_APP_SECRET はsecretで設定し、/threads/start で連携する。
-THREADS_AUTOPOST_TIME_JST = "09:00,15:00,21:00"
+THREADS_AUTOPOST_TIME_JST = "08:00,13:00,17:00,21:00"
 # 投稿指標の収集+分析(伸びる型の学習)を回すJSTの時刻。1日1回。
 THREADS_INSIGHTS_TIME_JST = "23:30"

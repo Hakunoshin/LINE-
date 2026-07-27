@@ -83,7 +83,7 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
 // 求人(circus公開URL) → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回、各回ランダムに1件。
-const DEFAULT_THREADS_AUTOPOST_TIMES = ["09:00", "15:00", "21:00"];
+const DEFAULT_THREADS_AUTOPOST_TIMES = ["08:00", "13:00", "17:00", "21:00"];
 // 投稿指標の収集+分析を回す時刻(1日1回)。
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "求人投稿";
