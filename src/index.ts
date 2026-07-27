@@ -228,6 +228,12 @@ app.post("/webhook", async (c) => {
       const reply = await handleCommand(c.env, userId, text, baseUrl);
       await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
     } catch (e) {
+      // 原因調査用にエラーをD1へ記録しておく。
+      try {
+        await setAppState(c.env.DB, "last_webhook_error", `${text}: ${(e as Error).message}`);
+      } catch {
+        // 記録失敗は無視
+      }
       try {
         await replyText(
           c.env.LINE_CHANNEL_ACCESS_TOKEN,

@@ -54,7 +54,35 @@ function toCircusJob(url: string, job: Record<string, unknown>): CircusJob {
   };
 }
 
-/** 公開求人URLを取得し、求人内容を解析して返す。取得/解析できなければ例外を投げる。 */
+// 文字列中のstartBrace位置('{')から、対応する'}'までのバランスの取れた
+// JSONオブジェクト文字列を切り出す(文字列内の括弧・エスケープを考慮)。
+function extractBalancedObject(s: string, startBrace: number): string {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = startBrace; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') {
+      inStr = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return s.slice(startBrace, i + 1);
+    }
+  }
+  throw new Error("求人データ(publicJob)の終端が見つかりませんでした");
+}
+
+/**
+ * 公開求人URLを取得し、求人内容を解析して返す。取得/解析できなければ例外を投げる。
+ * ページHTML(約500KB)全体をパースするとWorkerのCPU制限に触れうるため、
+ * 必要な publicJob オブジェクト(数KB)だけを抜き出してパースする。
+ */
 export async function fetchCircusPublicJob(url: string): Promise<CircusJob> {
   const res = await fetch(url, {
     headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" },
@@ -63,20 +91,25 @@ export async function fetchCircusPublicJob(url: string): Promise<CircusJob> {
     throw new Error(`circus fetch error: ${res.status}`);
   }
   const html = await res.text();
-  const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (!m) {
-    throw new Error("求人データ(__NEXT_DATA__)が見つかりませんでした");
+
+  const key = '"publicJob":';
+  const ki = html.indexOf(key);
+  if (ki === -1) {
+    throw new Error("求人データ(publicJob)が見つかりませんでした");
+  }
+  const braceStart = html.indexOf("{", ki + key.length);
+  if (braceStart === -1) {
+    throw new Error("求人データ(publicJob)の開始が見つかりませんでした");
   }
 
-  let data: unknown;
+  let publicJob: { job?: Record<string, unknown> };
   try {
-    data = JSON.parse(m[1]);
+    publicJob = JSON.parse(extractBalancedObject(html, braceStart));
   } catch {
     throw new Error("求人データのJSON解析に失敗しました");
   }
 
-  const job = (data as { props?: { pageProps?: { publicJob?: { job?: Record<string, unknown> } } } })
-    ?.props?.pageProps?.publicJob?.job;
+  const job = publicJob?.job;
   if (!job || Object.keys(job).length === 0) {
     throw new Error("この求人は公開されていません(公開トークンが無効/期限切れの可能性)");
   }
