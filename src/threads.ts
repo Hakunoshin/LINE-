@@ -45,6 +45,31 @@ async function postForm(path: string, params: Record<string, string>): Promise<R
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// コンテナの状態が FINISHED(公開可能) になるまでポーリングする。
+// ERROR/EXPIRED は例外。上限まで待っても FINISHED にならなければそのまま進む(公開は成功しうる)。
+async function waitForContainerReady(config: ThreadsConfig, creationId: string): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    const params = new URLSearchParams({
+      fields: "status,error_message",
+      access_token: config.accessToken,
+    });
+    const res = await fetch(`${THREADS_API_BASE}/${creationId}?${params.toString()}`);
+    const text = await res.text();
+    if (res.ok) {
+      const data = JSON.parse(text) as { status?: string; error_message?: string };
+      if (data.status === "FINISHED" || data.status === "PUBLISHED") return;
+      if (data.status === "ERROR" || data.status === "EXPIRED") {
+        throw new Error(`Threads container ${data.status}: ${data.error_message ?? ""}`);
+      }
+    }
+    await sleep(1500);
+  }
+}
+
 /**
  * テキストのみのThreads投稿を作成して公開する。公開されたメディアIDを返す。
  * テキストは自動で500文字に丸める。
@@ -63,7 +88,11 @@ export async function postThreadsText(config: ThreadsConfig, text: string): Prom
     throw new Error(`Threads container creation returned no id: ${JSON.stringify(created)}`);
   }
 
-  // (2) 公開
+  // (2) コンテナが公開可能(FINISHED)になるまで待つ。
+  // 作成直後に公開すると準備が間に合わず400になることがあるため(競合対策)。
+  await waitForContainerReady(config, creationId);
+
+  // (3) 公開
   const published = await postForm(`/${config.userId}/threads_publish`, {
     creation_id: creationId,
     access_token: config.accessToken,
