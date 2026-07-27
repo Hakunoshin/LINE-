@@ -32,8 +32,8 @@ import {
   getThreadsInsights,
   type ThreadsConfig,
 } from "./threads";
-import { generateThreadsPostFromText, formatRawJobPost, analyzePerformance, type CtaType } from "./threadsContent";
-import { fetchCircusPublicJob, extractCircusJobUrls, circusJobToText } from "./circus";
+import { generateThreadsPostFromText, buildTemplatePost, analyzePerformance, type CtaType } from "./threadsContent";
+import { fetchCircusPublicJob, extractCircusJobUrls, circusJobToText, type CircusJob } from "./circus";
 import { DEFAULT_JOB_URLS } from "./jobs";
 
 export interface Env {
@@ -648,30 +648,32 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
   const url = candidates[Math.floor(Math.random() * candidates.length)];
 
   // circusの公開URLから求人内容を取得する。
-  let jobText: string;
-  let jobId: string;
-  let company = "";
+  let job: CircusJob;
   try {
-    const job = await fetchCircusPublicJob(url);
-    jobText = circusJobToText(job);
-    jobId = job.id || url;
-    company = job.company;
+    job = await fetchCircusPublicJob(url);
   } catch (e) {
     return { error: `求人取得に失敗: ${(e as Error).message}` };
   }
+  const jobId = job.id || url;
 
   // A/Bテストで今回のCTA(DM誘導 or コメント誘導)を決める。
   const cta = await chooseCta(env);
 
-  // 「伸びる型」の分析メモを反映して投稿文を生成(APIキーが無ければ内容を丸めて使う)。
-  // 企業名は投稿に出さない方針なので、企業名を禁止ワードとして渡す。
+  // 投稿文を生成。APIキーがあればClaudeが「伸びる型(learnings)」を反映して作文＋企業名を匿名化。
+  // 無ければ構造化テンプレート(企業名は機械的に除去)で組み立てる。どちらも企業名は出さない。
   const learnings = await getAppState(env.DB, "threads_post_learnings");
-  let text = formatRawJobPost(jobText, cta);
+  let text = buildTemplatePost(job, cta);
   if (env.ANTHROPIC_API_KEY) {
     try {
-      text = await generateThreadsPostFromText(env.ANTHROPIC_API_KEY, jobText, learnings, cta, company);
+      text = await generateThreadsPostFromText(
+        env.ANTHROPIC_API_KEY,
+        circusJobToText(job),
+        learnings,
+        cta,
+        job.company
+      );
     } catch {
-      text = formatRawJobPost(jobText, cta);
+      text = buildTemplatePost(job, cta);
     }
   }
 

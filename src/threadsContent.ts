@@ -3,6 +3,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { PostMetric } from "./db";
+import type { CircusJob } from "./circus";
 import { THREADS_TEXT_LIMIT, truncateForThreads } from "./threads";
 
 function client(apiKey: string): Anthropic {
@@ -23,14 +24,47 @@ const CTA_FALLBACK_TEXT: Record<CtaType, string> = {
   comment: "気になる方はコメントに「詳細希望」と一言ください💬",
 };
 
-// APIキーが無い/生成に失敗したときの簡易フォールバック。求人票の本文＋CTA＋ハッシュタグ。
-export function formatRawJobPost(jobText: string, cta: CtaType): string {
-  const trimmed = jobText.trim();
-  const tail = `\n\n${CTA_FALLBACK_TEXT[cta]}\n\n#求人 #転職 #キャリア`;
-  // CTA+ハッシュタグを付けて上限を超えるなら、本文を丸めてから付ける。
-  if (trimmed.length + tail.length <= THREADS_TEXT_LIMIT) return trimmed + tail;
-  const room = THREADS_TEXT_LIMIT - tail.length;
-  return truncateForThreads(trimmed.slice(0, Math.max(0, room))) + tail;
+// 企業名(および前後の「株式会社」等)を文中から除去する。
+function stripCompany(text: string, company: string): string {
+  if (!text) return "";
+  let t = text;
+  if (company) {
+    // 完全一致と、「株式会社」を外した社名本体の両方を消す。
+    const core = company.replace(/株式会社|有限会社|合同会社|\(株\)|（株）/g, "").trim();
+    for (const term of [company, core].filter((s) => s && s.length >= 2)) {
+      t = t.split(term).join("");
+    }
+  }
+  return t;
+}
+
+// 空白・改行を詰めて指定文字数で丸める。
+function snippet(text: string, max: number): string {
+  const t = text.replace(/\s+/g, " ").replace(/^[\s■◆◎●・\-–—]+/, "").trim();
+  return t.length <= max ? t : t.slice(0, max).trim() + "…";
+}
+
+// APIキーが無い/生成に失敗したときのテンプレート投稿。構造化項目から組み立て、企業名は出さない。
+export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
+  const lines: string[] = [];
+  const title = stripCompany(job.title, job.company).trim();
+  lines.push(title || "注目の求人情報👀");
+  lines.push("");
+  if (job.annualSalary) lines.push(`💰 想定年収 ${job.annualSalary}`);
+  if (job.location) {
+    const loc = snippet(stripCompany(job.location, job.company), 30);
+    if (loc) lines.push(`📍 ${loc}`);
+  }
+  const appeal = snippet(stripCompany(job.appealingPoints || job.description || "", job.company), 140);
+  if (appeal) {
+    lines.push("");
+    lines.push(appeal);
+  }
+  lines.push("");
+  lines.push(CTA_FALLBACK_TEXT[cta]);
+  lines.push("");
+  lines.push("#求人 #転職 #キャリア");
+  return truncateForThreads(lines.join("\n"));
 }
 
 /**
