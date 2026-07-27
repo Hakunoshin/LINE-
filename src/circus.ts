@@ -18,6 +18,8 @@ export interface CircusJob {
   company: string;
   annualSalary: string;
   location: string;
+  holidays: string; // 年間休日日数
+  minQualification: string; // 応募資格(未経験OK等)
   description: string;
   appealingPoints: string;
   benefitsNote: string;
@@ -40,6 +42,7 @@ function toCircusJob(url: string, job: Record<string, unknown>): CircusJob {
 
   // 勤務地: 詳細住所があれば冒頭を、無ければ勤務地コメントを使う。
   const location = asText(job.addressDetail) || asText(job.locationComments);
+  const holidaysNum = typeof job.numberOfHolidaysPerYear === "number" ? String(job.numberOfHolidaysPerYear) : "";
 
   return {
     id: String(job.id ?? ""),
@@ -48,6 +51,8 @@ function toCircusJob(url: string, job: Record<string, unknown>): CircusJob {
     company: asText(company?.name),
     annualSalary,
     location,
+    holidays: holidaysNum,
+    minQualification: asText(job.minimumQualification),
     description: asText(job.jobDescriptions),
     appealingPoints: asText(job.appealingPoints),
     benefitsNote: asText(job.payAndBenefits) || asText(job.otherBenefits),
@@ -124,7 +129,8 @@ export function circusJobToText(job: CircusJob): string {
   return [
     `職種: ${job.title}`,
     job.annualSalary && `想定年収: ${job.annualSalary}`,
-    job.location && `勤務地: ${job.location}`,
+    job.holidays && `年間休日: ${job.holidays}日`,
+    job.minQualification && `応募資格: ${job.minQualification}`,
     job.appealingPoints && `アピールポイント:\n${job.appealingPoints}`,
     job.description && `仕事内容:\n${job.description}`,
     job.benefitsNote && `待遇・福利厚生:\n${job.benefitsNote}`,

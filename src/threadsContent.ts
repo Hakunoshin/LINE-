@@ -4,7 +4,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { PostMetric } from "./db";
 import type { CircusJob } from "./circus";
-import { THREADS_TEXT_LIMIT, truncateForThreads } from "./threads";
+import { truncateForThreads } from "./threads";
 
 function client(apiKey: string): Anthropic {
   return new Anthropic({ apiKey });
@@ -40,30 +40,45 @@ function stripCompany(text: string, company: string): string {
 
 // 空白・改行を詰めて指定文字数で丸める。
 function snippet(text: string, max: number): string {
-  const t = text.replace(/\s+/g, " ").replace(/^[\s■◆◎●・\-–—]+/, "").trim();
+  const t = text.replace(/\s+/g, " ").replace(/^[\s■◆◎●★・\-–—]+/, "").trim();
   return t.length <= max ? t : t.slice(0, max).trim() + "…";
 }
 
-// APIキーが無い/生成に失敗したときのテンプレート投稿。構造化項目から組み立て、企業名は出さない。
+// タイトルを短いフックにする(区切り文字までを採り、企業名を除去)。
+function shortHook(title: string, company: string): string {
+  const t = stripCompany(title, company).replace(/\s+/g, " ").trim();
+  const cut = t.split(/[｜|／/]/)[0].trim();
+  return snippet(cut || t, 34);
+}
+
+// アピール本文から短い訴求フレーズを最大n個抽出する。
+function extractAppealPhrases(text: string, company: string, n: number): string[] {
+  if (!text) return [];
+  const cleaned = stripCompany(text, company);
+  return cleaned
+    .split(/[\n。！!、／/｜|]|【[^】]*】|[◎●★☆◆▶✔✅🔶🔷🔸🔹]/)
+    .map((s) => s.replace(/^[\s：:・\-–—]+/, "").trim())
+    .filter((s) => s.length >= 6 && s.length <= 24)
+    .slice(0, n);
+}
+
+// APIキーが無い/生成に失敗したときのテンプレート投稿。
+// Threadsは短い方が伸びるため、フック＋訴求3点＋CTA＋タグの簡潔な構成にする。
+// 勤務地・企業名は入れない。
 export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
-  const lines: string[] = [];
-  const title = stripCompany(job.title, job.company).trim();
-  lines.push(title || "注目の求人情報👀");
-  lines.push("");
-  if (job.annualSalary) lines.push(`💰 想定年収 ${job.annualSalary}`);
-  if (job.location) {
-    const loc = snippet(stripCompany(job.location, job.company), 30);
-    if (loc) lines.push(`📍 ${loc}`);
+  // 訴求ポイント(最大3つ)を構造化データ優先で組み立てる。
+  const points: string[] = [];
+  if (job.annualSalary) points.push(`💰 想定年収 ${job.annualSalary}`);
+  if (job.holidays) points.push(`🗓 年間休日${job.holidays}日`);
+  if (/未経験|不問/.test(job.minQualification)) points.push("🔰 未経験歓迎");
+  for (const phrase of extractAppealPhrases(job.appealingPoints || job.description || "", job.company, 3)) {
+    if (points.length >= 3) break;
+    points.push(`✅ ${phrase}`);
   }
-  const appeal = snippet(stripCompany(job.appealingPoints || job.description || "", job.company), 140);
-  if (appeal) {
-    lines.push("");
-    lines.push(appeal);
-  }
-  lines.push("");
-  lines.push(CTA_FALLBACK_TEXT[cta]);
-  lines.push("");
-  lines.push("#求人 #転職 #キャリア");
+
+  const lines: string[] = [shortHook(job.title, job.company) || "注目の求人👀", ""];
+  lines.push(...points.slice(0, 3));
+  lines.push("", CTA_FALLBACK_TEXT[cta], "", "#求人 #転職 #キャリア");
   return truncateForThreads(lines.join("\n"));
 }
 
@@ -85,16 +100,15 @@ export async function generateThreadsPostFromText(
     "与えられた求人票1件を、Threadsで反応(閲覧・いいね・返信・リポスト)が伸びる投稿文にしてください。",
     "",
     "制約:",
-    `- 全体で${THREADS_TEXT_LIMIT}文字以内。日本語。プレーンテキスト(Markdown記法は使わない)。`,
-    "- 冒頭1行で目を引くフック。改行と絵文字は適度に使い、読みやすく。",
+    "- Threadsは短い投稿ほど伸びるので、全体を短くまとめる(目安150〜250文字、長くても300文字以内)。",
+    "- 日本語。プレーンテキスト(Markdown記法は使わない)。",
+    "- 冒頭1行で目を引くフック。そのあと訴求ポイントを3つ程度、箇条書き(絵文字1つ+短い一言)で。",
     "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
-    "- 企業名・会社名は本文に一切出さないこと。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
-    bannedCompany
-      ? `- 特に「${bannedCompany}」という固有名詞は絶対に本文に含めない。`
-      : "",
-    "- 求人票中にURLがあれば本文にそのまま含める。",
+    "- 企業名・会社名は本文に一切出さない。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
+    "- 勤務地・住所は入れない。",
+    bannedCompany ? `- 特に「${bannedCompany}」という固有名詞は絶対に本文に含めない。` : "",
     `- ${CTA_INSTRUCTION[cta]}`,
-    "- CTAの直後に関連ハッシュタグを3〜5個。",
+    "- CTAの直後に関連ハッシュタグを3〜4個。",
     "- 出力は投稿本文のみ。前置き・説明・コードブロックは不要。",
   ]
     .filter(Boolean)
