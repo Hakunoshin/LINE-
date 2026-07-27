@@ -637,6 +637,7 @@ async function getJobUrls(env: Env): Promise<string[]> {
 // 投稿文はClaudeが「これまで伸びた傾向(learnings)」を踏まえて生成し、
 // 投稿本文は分析用にthreads_post_metricsへ記録する。
 async function postRandomJobToThreads(env: Env): Promise<PostResult> {
+  await setAppState(env.DB, "post_stage", "1_start");
   const threads = await resolveThreadsConfig(env);
   if (!threads) {
     return { error: "Threads未連携です。/threads/start から連携してください。" };
@@ -653,6 +654,7 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
   const url = candidates[Math.floor(Math.random() * candidates.length)];
 
   // circusの公開URLから求人内容を取得する。
+  await setAppState(env.DB, "post_stage", "2_fetching");
   let job: CircusJob;
   try {
     job = await fetchCircusPublicJob(url);
@@ -660,6 +662,7 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
     return { error: `求人取得に失敗: ${(e as Error).message}` };
   }
   const jobId = job.id || url;
+  await setAppState(env.DB, "post_stage", "3_job_fetched");
 
   // A/Bテストで今回のCTA(DM誘導 or コメント誘導)を決める。
   const cta = await chooseCta(env);
@@ -682,12 +685,15 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
     }
   }
 
+  await setAppState(env.DB, "post_stage", "4_posting");
   try {
     const mediaId = await postThreadsText(threads, text);
     await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text, cta);
     await setAppState(env.DB, "last_posted_job_url", url);
+    await setAppState(env.DB, "post_stage", "5_done");
     return { postedText: text, cta };
   } catch (e) {
+    await setAppState(env.DB, "post_stage", `error_posting:${(e as Error).message}`.slice(0, 80));
     return { error: `投稿に失敗: ${(e as Error).message}` };
   }
 }

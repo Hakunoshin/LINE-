@@ -89,9 +89,20 @@ function extractBalancedObject(s: string, startBrace: number): string {
  * 必要な publicJob オブジェクト(数KB)だけを抜き出してパースする。
  */
 export async function fetchCircusPublicJob(url: string): Promise<CircusJob> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" },
-  });
+  // ハングで無応答終了しないよう、取得に8秒のタイムアウトを設ける。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "text/html" },
+      signal: controller.signal,
+    });
+  } catch (e) {
+    throw new Error(`circus fetch failed: ${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     throw new Error(`circus fetch error: ${res.status}`);
   }
