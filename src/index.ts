@@ -328,7 +328,7 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
 
   if (trimmed === "投稿テスト" || trimmed === "通知テスト" || trimmed === "Threadsテスト") {
     // 実際にはThreadsへ投稿せず、「投稿した体」の秘書通知だけを本番と同じ形式で送る。
-    await notifyOwnerOfPost(env, SAMPLE_POST_TEXT, "dm");
+    await notifyOwnerOfPost(env, { postedText: SAMPLE_POST_TEXT, cta: "dm", company: "株式会社サンプル" });
     return "秘書からの投稿通知をテスト送信しました。この直後に届くメッセージが、実際の自動投稿時と同じ形式です(Threadsへの投稿はしていません)。";
   }
 
@@ -339,7 +339,8 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     const result = await postRandomJobToThreads(env);
     if (result.postedText) {
       const cta = result.cta ? ` (導線: ${ctaLabel(result.cta)})` : "";
-      return `Threadsに投稿しました。${cta}\n\n${result.postedText}`;
+      const company = `企業: ${result.company || "(企業名なし)"}`;
+      return `Threadsに投稿しました。${cta}\n${company}\n\n${result.postedText}`;
     }
     return `投稿できませんでした: ${result.error ?? "不明なエラー"}`;
   }
@@ -587,6 +588,8 @@ async function resolveThreadsConfig(env: Env): Promise<ThreadsConfig | null> {
 interface PostResult {
   postedText?: string;
   cta?: CtaType;
+  company?: string; // どの企業の求人票を使ったか(秘書通知用。公開投稿には出さない)
+  sourceUrl?: string; // 元のcircus求人URL
   error?: string;
 }
 
@@ -692,7 +695,7 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
     await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text, cta);
     await setAppState(env.DB, "last_posted_job_url", url);
     await setAppState(env.DB, "post_stage", "5_done");
-    return { postedText: text, cta };
+    return { postedText: text, cta, company: job.company, sourceUrl: url };
   } catch (e) {
     await setAppState(env.DB, "post_stage", `error_posting:${(e as Error).message}`.slice(0, 80));
     return { error: `投稿に失敗: ${(e as Error).message}` };
@@ -714,14 +717,18 @@ function ctaLabel(cta?: CtaType): string {
   return "";
 }
 
-// 投稿結果を「秘書からの報告」としてLINEに通知する。投稿本文と今回の導線(CTA)も添える。
-async function notifyOwnerOfPost(env: Env, text: string, cta?: CtaType): Promise<void> {
+// 投稿結果を「秘書からの報告」としてLINEに通知する。
+// どの企業の求人票を使ったか・元URL・導線(CTA)・投稿本文を添える(通知は本人のみ)。
+async function notifyOwnerOfPost(env: Env, result: PostResult): Promise<void> {
   const target = await getPushTargetUserId(env);
-  if (!target) return;
-  const header = cta
-    ? `秘書です。以下の求人をThreadsに投稿しました🧵 (導線: ${ctaLabel(cta)})`
-    : "秘書です。以下の求人をThreadsに投稿しました🧵";
-  await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, [header, "", text].join("\n"));
+  if (!target || !result.postedText) return;
+  const lines = [
+    `秘書です。以下の求人をThreadsに投稿しました🧵${result.cta ? ` (導線: ${ctaLabel(result.cta)})` : ""}`,
+  ];
+  lines.push(`企業: ${result.company || "(企業名なし)"}`);
+  if (result.sourceUrl) lines.push(`🔗 ${result.sourceUrl}`);
+  lines.push("", result.postedText);
+  await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, lines.join("\n"));
 }
 
 // 求人URLリストからランダムに1件Threadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
@@ -742,7 +749,7 @@ async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
     return;
   }
   await setAppState(env.DB, "last_threads_autopost_slot", slotKey);
-  await notifyOwnerOfPost(env, result.postedText, result.cta);
+  await notifyOwnerOfPost(env, result);
 }
 
 function getThreadsInsightsTime(env: Env): string {
