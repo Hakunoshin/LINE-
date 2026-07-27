@@ -659,6 +659,7 @@ async function postRandomJobToThreads(env: Env): Promise<PostResult> {
   try {
     job = await fetchCircusPublicJob(url);
   } catch (e) {
+    await setAppState(env.DB, "post_stage", `error_fetch:${(e as Error).message}`.slice(0, 90));
     return { error: `求人取得に失敗: ${(e as Error).message}` };
   }
   const jobId = job.id || url;
