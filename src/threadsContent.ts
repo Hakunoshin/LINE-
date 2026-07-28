@@ -44,41 +44,76 @@ function snippet(text: string, max: number): string {
   return t.length <= max ? t : t.slice(0, max).trim() + "…";
 }
 
-// タイトルを短いフックにする(区切り文字までを採り、企業名を除去)。
+// タイトルを短いフックにする(区切り文字までを採り、企業名を除去)。最終フォールバック用。
 function shortHook(title: string, company: string): string {
   const t = stripCompany(title, company).replace(/\s+/g, " ").trim();
   const cut = t.split(/[｜|／/]/)[0].trim();
   return snippet(cut || t, 34);
 }
 
-// アピール本文から短い訴求フレーズを最大n個抽出する。
+// アピール文/仕事内容から、1行目のフックになる強い短文を1つ取り出す。
+// 先頭の装飾(＼POINT／、【PRポイント①】、＜…＞、≪…≫、記号・絵文字)を剥がし、最初の一文を採る。
+function pickHook(text: string, company: string): string {
+  if (!text) return "";
+  let t = stripCompany(text, company).replace(/\s+/g, " ").trim();
+  let prev = "";
+  while (t !== prev) {
+    prev = t;
+    t = t.replace(/^[\s＼／\\｜|■◆◎●★☆▶✔✅☑🔶🔷🔸🔹👀📢💡🎯・:：\-–—「」『』]+/, "");
+    t = t.replace(/^(?:【[^】]{0,16}】|＜[^＞]{0,16}＞|≪[^≫]{0,16}≫|POINT|ポイント)[!！]?\s*/i, "");
+  }
+  t = t.trim();
+  if (!t) return "";
+  let seg = t.slice(0, 48);
+  const cut = seg.slice(8).search(/[。．！!？?■【＼＜≪★◎●▶🔶🔷]/);
+  if (cut >= 0) {
+    const end = 8 + cut;
+    seg = /[。．！!？?]/.test(seg[end]) ? seg.slice(0, end + 1) : seg.slice(0, end);
+  }
+  seg = seg.replace(/[。．\s]+$/, "").trim();
+  if (seg.length < 7) return "";
+  if (/^(ポイント|PR|概要|募集|仕事内容)/i.test(seg)) return "";
+  return snippet(seg, 44);
+}
+
+// アピール本文から、求人票に書かれた訴求フレーズを最大n個抽出する(引用に使う)。
 function extractAppealPhrases(text: string, company: string, n: number): string[] {
   if (!text) return [];
-  const cleaned = stripCompany(text, company);
-  return cleaned
-    .split(/[\n。！!、／/｜|]|【[^】]*】|[◎●★☆◆▶✔✅🔶🔷🔸🔹]/)
-    .map((s) => s.replace(/^[\s：:・\-–—]+/, "").trim())
-    .filter((s) => s.length >= 6 && s.length <= 24)
+  return stripCompany(text, company)
+    .split(/[\n。！!、／/｜|]|【[^】]*】|＜|＞|≪|≫|[◎●★☆◆▶✔✅☑🔶🔷🔸🔹＼]/)
+    .map((s) => s.replace(/^[\s：:・\-–—「」『』]+/, "").replace(/[「」『』]/g, "").trim())
+    .filter(
+      (s) =>
+        s.length >= 7 &&
+        s.length <= 22 &&
+        !/^(ポイント|PR|POINT|概要)/i.test(s) &&
+        !/(について|における)$/.test(s) &&
+        !/[のにをでとがはやな、]$/.test(s)
+    )
     .slice(0, n);
 }
 
 // APIキーが無い/生成に失敗したときのテンプレート投稿。
-// Threadsは短い方が伸びるため、フック＋訴求3点＋CTA＋タグの簡潔な構成にする。
-// 勤務地・企業名は入れない。
+// 1行目は求人票の訴求文から作った刺さるフック、続けて想定年収＋求人票から引用した訴求ポイント。
+// Threadsは短い方が伸びるため簡潔に。勤務地・企業名は入れない。
 export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
-  // 訴求ポイント(最大3つ)を構造化データ優先で組み立てる。
+  const appeal = job.appealingPoints || "";
+  const hook =
+    pickHook(appeal, job.company) ||
+    pickHook(job.description, job.company) ||
+    shortHook(job.title, job.company) ||
+    "注目の求人👀";
+
   const points: string[] = [];
   if (job.annualSalary) points.push(`💰 想定年収 ${job.annualSalary}`);
-  if (job.holidays) points.push(`🗓 年間休日${job.holidays}日`);
-  if (/未経験|不問/.test(job.minQualification)) points.push("🔰 未経験歓迎");
-  for (const phrase of extractAppealPhrases(job.appealingPoints || job.description || "", job.company, 3)) {
+  for (const phrase of extractAppealPhrases(appeal, job.company, 3)) {
     if (points.length >= 3) break;
-    points.push(`✅ ${phrase}`);
+    if (!hook.includes(phrase)) points.push(`✅ ${phrase}`);
   }
+  if (points.length < 3 && job.holidays) points.push(`🗓 年間休日${job.holidays}日`);
+  if (points.length < 3 && /未経験|不問/.test(job.minQualification)) points.push("🔰 未経験歓迎");
 
-  const lines: string[] = [shortHook(job.title, job.company) || "注目の求人👀", ""];
-  lines.push(...points.slice(0, 3));
-  lines.push("", CTA_FALLBACK_TEXT[cta], "", "#求人 #転職 #キャリア");
+  const lines: string[] = [hook, "", ...points.slice(0, 3), "", CTA_FALLBACK_TEXT[cta], "", "#求人 #転職 #キャリア"];
   return truncateForThreads(lines.join("\n"));
 }
 
@@ -102,7 +137,8 @@ export async function generateThreadsPostFromText(
     "制約:",
     "- Threadsは短い投稿ほど伸びるので、全体を短くまとめる(目安150〜250文字、長くても300文字以内)。",
     "- 日本語。プレーンテキスト(Markdown記法は使わない)。",
-    "- 冒頭1行で目を引くフック。そのあと訴求ポイントを3つ程度、箇条書き(絵文字1つ+短い一言)で。",
+    "- 1行目は最重要。求人票の『アピールポイント』の一番刺さる要素を活かして、思わず読みたくなる強いフックにする。",
+    "- そのあと訴求ポイントを3つ程度、箇条書き(絵文字1つ+短い一言)で。求人票に書かれた訴求文を引用・活用する。",
     "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
     "- 企業名・会社名は本文に一切出さない。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
     "- 勤務地・住所は入れない。",
