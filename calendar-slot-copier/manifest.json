@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "カレンダー候補日コピー",
+  "version": "1.2.0",
+  "description": "Googleカレンダー上でドラッグして選んだ日程を「〇月〇日(〇) HH:MM-HH:MM」形式のテキストにまとめてコピー、またはGoogleカレンダーの予定として登録します。",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://calendar.google.com/*"],
+  "action": {
+    "default_title": "候補日コピーを開く/閉じる"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://calendar.google.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
