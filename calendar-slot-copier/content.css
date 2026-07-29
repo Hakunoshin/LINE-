@@ -150,6 +150,83 @@
   padding: 4px 0;
 }
 
+.csc-settings {
+  padding: 0 12px 4px;
+}
+
+.csc-settings-toggle {
+  border: 0;
+  background: transparent;
+  color: #5f6368;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.csc-settings-toggle:hover {
+  color: #202124;
+}
+
+.csc-settings-body {
+  padding: 4px 0 6px;
+}
+
+.csc-settings-note {
+  margin: 0 0 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #5f6368;
+}
+
+.csc-settings-label {
+  display: block;
+  font-size: 10px;
+  color: #5f6368;
+  margin: 6px 0 2px;
+}
+
+.csc-redirect-uri {
+  display: block;
+  font: 10px/1.4 ui-monospace, monospace;
+  background: #f1f3f4;
+  border-radius: 4px;
+  padding: 4px 6px;
+  word-break: break-all;
+  user-select: all;
+  color: #202124;
+}
+
+.csc-client-id {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 4px 6px;
+  color: #202124;
+}
+
+.csc-client-id:focus {
+  outline: none;
+  border-color: #4285f4;
+}
+
+.csc-save-client {
+  margin-top: 6px;
+  padding: 5px 0;
+  font-size: 12px;
+}
+
+.csc-settings-status {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #b06000;
+}
+
+.csc-settings-status.csc-settings-ok {
+  color: #188038;
+}
+
 .csc-panel-footer {
   display: flex;
   gap: 8px;

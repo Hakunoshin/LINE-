@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "カレンダー候補日コピー",
   "version": "1.2.0",
-  "description": "Googleカレンダー上でドラッグして選んだ日程を「〇月〇日(〇) HH:MM-HH:MM」形式のテキストにまとめてコピー、またはGoogleカレンダーの予定として登録します。",
-  "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["https://calendar.google.com/*"],
+  "description": "Googleカレンダー上でドラッグして選んだ日程を「〇月〇日(〇) HH:MM-HH:MM」形式のテキストでコピー、またはそのままGoogleカレンダーの予定として登録します。",
+  "permissions": ["activeTab", "scripting", "identity", "storage"],
+  "host_permissions": ["https://calendar.google.com/*", "https://www.googleapis.com/*"],
   "action": {
     "default_title": "候補日コピーを開く/閉じる"
   },

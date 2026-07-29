@@ -20,6 +20,10 @@
   let warningEl = null;
   let debugEl = null;
   let debugPreEl = null;
+  let settingsBodyEl = null;
+  let clientIdInputEl = null;
+  let redirectUriEl = null;
+  let settingsStatusEl = null;
 
   let selections = [];
   let layout = null;
@@ -95,6 +99,10 @@
     warningEl = null;
     debugEl = null;
     debugPreEl = null;
+    settingsBodyEl = null;
+    clientIdInputEl = null;
+    redirectUriEl = null;
+    settingsStatusEl = null;
   }
 
   function dispose() {
@@ -137,6 +145,18 @@
       '<input class="csc-label-input" aria-label="コピー時の見出し / 予定タイトル" value="【候補日】" />' +
       '<ul class="csc-list"></ul>' +
       "</div>" +
+      '<div class="csc-settings">' +
+      '<button type="button" class="csc-settings-toggle">⚙ Google連携設定</button>' +
+      '<div class="csc-settings-body" style="display:none">' +
+      '<p class="csc-settings-note">「カレンダーに登録」で予定を自動作成するには、Google の OAuth クライアントID（ウェブアプリケーション）が必要です。未設定の場合は予定作成画面を開く方式で代用します。</p>' +
+      '<label class="csc-settings-label">承認済みのリダイレクトURI（この値をOAuthクライアントに登録）</label>' +
+      '<code class="csc-redirect-uri">読み込み中…</code>' +
+      '<label class="csc-settings-label">OAuth クライアントID</label>' +
+      '<input class="csc-client-id" placeholder="xxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false" />' +
+      '<button type="button" class="csc-btn csc-btn-secondary csc-save-client">保存</button>' +
+      '<span class="csc-settings-status"></span>' +
+      "</div>" +
+      "</div>" +
       '<div class="csc-panel-footer">' +
       '<button type="button" class="csc-btn csc-btn-secondary" data-action="close">終了</button>' +
       '<button type="button" class="csc-btn csc-btn-calendar" data-action="calendar">カレンダーに登録</button>' +
@@ -157,6 +177,25 @@
     });
     copyBtnEl.addEventListener("click", onCopy, { signal: uiAbort.signal });
     addToCalBtnEl.addEventListener("click", onAddAllToCalendar, { signal: uiAbort.signal });
+
+    settingsBodyEl = panelEl.querySelector(".csc-settings-body");
+    clientIdInputEl = panelEl.querySelector(".csc-client-id");
+    redirectUriEl = panelEl.querySelector(".csc-redirect-uri");
+    settingsStatusEl = panelEl.querySelector(".csc-settings-status");
+
+    panelEl.querySelector(".csc-settings-toggle").addEventListener(
+      "click",
+      () => {
+        const open = settingsBodyEl.style.display !== "none";
+        settingsBodyEl.style.display = open ? "none" : "block";
+      },
+      { signal: uiAbort.signal }
+    );
+    panelEl.querySelector(".csc-save-client").addEventListener("click", onSaveClientId, {
+      signal: uiAbort.signal,
+    });
+    loadConfig();
+
     panelEl.querySelector(".csc-debug-copy").addEventListener(
       "click",
       async () => {
@@ -462,20 +501,11 @@
       addOne.type = "button";
       addOne.className = "csc-cal-one";
       addOne.textContent = "📅";
-      addOne.title = "この候補をGoogleカレンダーの予定作成画面で開く";
+      addOne.title = "この候補をGoogleカレンダーに登録";
       addOne.setAttribute("aria-label", formatSelection(selection) + "をカレンダーに登録");
-      addOne.addEventListener(
-        "click",
-        () => {
-          const win = openCalendarEvent(selection);
-          if (win) {
-            flashCalendarResult("カレンダーを開きました ✓", true);
-          } else {
-            showWarning("ポップアップがブロックされました。このサイトのポップアップを許可してください。");
-          }
-        },
-        { signal: uiAbort.signal }
-      );
+      addOne.addEventListener("click", () => registerToCalendar([selection]), {
+        signal: uiAbort.signal,
+      });
 
       remove.type = "button";
       remove.className = "csc-remove";
@@ -733,7 +763,7 @@
   function updateCopyState() {
     const disabled = selections.length === 0;
     if (copyBtnEl) copyBtnEl.disabled = disabled;
-    if (addToCalBtnEl) addToCalBtnEl.disabled = disabled;
+    if (addToCalBtnEl && !addToCalBtnEl.dataset.busy) addToCalBtnEl.disabled = disabled;
   }
 
   async function onCopy() {
@@ -755,56 +785,106 @@
     }
   }
 
-  // 選んだ候補すべてを、Googleカレンダーの「予定作成」画面（テンプレートURL）で開く。
-  // OAuthや追加のAPI権限は使わず、各候補ごとに事前入力済みの作成画面を新しいタブで開くだけ。
-  // ユーザーが内容を確認して保存する前提なので、既存予定を上書きすることはない。
   function onAddAllToCalendar() {
-    const items = sortedSelections();
-    if (!items.length) {
+    registerToCalendar(sortedSelections());
+  }
+
+  // 選んだ候補を Google Calendar API で実際の予定として作成する（保存まで自動）。
+  // OAuth クライアントID未設定・認証拒否などでAPI作成できない場合は、
+  // 予定作成画面をタブで開く方式にフォールバックして、必ず登録操作に進めるようにする。
+  async function registerToCalendar(items) {
+    if (!items || !items.length) {
       showWarning("カレンダーに登録する候補日時を選択してください。");
       return;
     }
 
-    if (items.length > 8 && !window.confirm(String(items.length) + "件の予定作成タブを開きます。よろしいですか？")) {
+    const title = (labelInputEl && labelInputEl.value.trim()) || "予定";
+    const timeZone = detectTimeZone();
+    const events = items.map((selection) => ({
+      start: localDateTime(selection, selection.startMin),
+      end: localDateTime(selection, selection.endMin),
+    }));
+
+    setCalendarBusy(true, "登録中…");
+
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({
+        type: "CSC_CREATE_EVENTS",
+        events,
+        title,
+        timeZone,
+      });
+    } catch (error) {
+      response = { ok: false, message: error && error.message ? error.message : String(error) };
+    }
+
+    setCalendarBusy(false);
+
+    if (response && response.ok) {
+      flashCalendarResult(String(response.created) + "件を登録しました ✓", true);
+      if (response.failed) {
+        showWarning(String(response.failed) + "件は登録に失敗しました。時間をおいて再度お試しください。");
+      } else {
+        showWarning("");
+      }
       return;
     }
 
-    let opened = 0;
-    let blocked = false;
-    for (const selection of items) {
-      const win = openCalendarEvent(selection);
-      if (win) {
-        opened += 1;
-      } else {
-        blocked = true;
-      }
-    }
-
-    if (blocked) {
+    if (response && response.code === "NO_CLIENT_ID") {
+      openSettings();
       showWarning(
-        "一部のタブがポップアップブロックで開けませんでした。このサイトのポップアップを許可するか、各候補の📅ボタンから1件ずつ開いてください。"
+        "予定を自動作成するには⚙Google連携設定でOAuthクライアントIDを設定してください。今回は予定作成画面を開きます。"
       );
     } else {
-      showWarning("");
+      showWarning(
+        "APIでの登録に失敗しました（" +
+          ((response && response.message) || "不明なエラー") +
+          "）。予定作成画面を開きます。"
+      );
     }
-    if (opened > 0) {
-      flashCalendarResult(String(opened) + "件の作成画面を開きました ✓", true);
+    openTemplateFallback(items);
+  }
+
+  function setCalendarBusy(busy, label) {
+    if (!addToCalBtnEl) return;
+    if (busy) {
+      addToCalBtnEl.dataset.busy = "1";
+      addToCalBtnEl.disabled = true;
+      addToCalBtnEl.textContent = label || "登録中…";
+    } else {
+      delete addToCalBtnEl.dataset.busy;
+      addToCalBtnEl.textContent = "カレンダーに登録";
+      updateCopyState();
     }
   }
 
-  function openCalendarEvent(selection) {
-    return window.open(calendarEventUrl(selection), "_blank", "noopener");
+  function detectTimeZone() {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Tokyo";
+    } catch (error) {
+      return "Asia/Tokyo";
+    }
   }
 
-  function calendarEventUrl(selection) {
-    const parts = selection.dateKey.split("-").map(Number);
-    const year = parts[0];
-    const month = parts[1];
-    const day = parts[2];
-    const start = floatingStamp(year, month, day, selection.startMin);
-    const end = floatingStamp(year, month, day, selection.endMin);
+  // OAuth未設定や認証失敗時のフォールバック。各候補を予定作成画面（TEMPLATE URL）で開く。
+  function openTemplateFallback(items) {
+    let blocked = false;
+    for (const selection of items) {
+      const win = window.open(calendarTemplateUrl(selection), "_blank", "noopener");
+      if (!win) blocked = true;
+    }
+    if (blocked) {
+      showWarning(
+        "ポップアップがブロックされました。このサイトのポップアップを許可するか、各候補の📅から1件ずつ開いてください。"
+      );
+    }
+  }
+
+  function calendarTemplateUrl(selection) {
+    const start = compactStamp(selection, selection.startMin);
+    const end = compactStamp(selection, selection.endMin);
     const title = (labelInputEl && labelInputEl.value.trim()) || "予定";
-
     return (
       "https://calendar.google.com/calendar/render?action=TEMPLATE" +
       "&text=" +
@@ -816,12 +896,27 @@
     );
   }
 
-  // 分(0-1440)を、その日を基準にしたローカル時刻(YYYYMMDDTHHMMSS, フローティング)へ変換する。
-  // 終了が24:00(=1440分)のときは翌日00:00へ正しく繰り上がる。タイムゾーン指定を付けないため、
-  // Googleカレンダー側では利用者のカレンダーの既定タイムゾーンの壁時計時刻として解釈される。
-  function floatingStamp(year, month, day, minutes) {
-    const date = new Date(year, month - 1, day, 0, 0, 0, 0);
-    date.setMinutes(date.getMinutes() + minutes);
+  // API用のローカル時刻文字列(YYYY-MM-DDTHH:MM:SS, オフセットなし)。timeZoneフィールドと併せて渡す。
+  function localDateTime(selection, minutes) {
+    const date = dateFromSelection(selection, minutes);
+    const p2 = (n) => String(n).padStart(2, "0");
+    return (
+      String(date.getFullYear()) +
+      "-" +
+      p2(date.getMonth() + 1) +
+      "-" +
+      p2(date.getDate()) +
+      "T" +
+      p2(date.getHours()) +
+      ":" +
+      p2(date.getMinutes()) +
+      ":00"
+    );
+  }
+
+  // TEMPLATE URL用のコンパクト表記(YYYYMMDDTHHMMSS)。
+  function compactStamp(selection, minutes) {
+    const date = dateFromSelection(selection, minutes);
     const p2 = (n) => String(n).padStart(2, "0");
     return (
       String(date.getFullYear()) +
@@ -832,6 +927,48 @@
       p2(date.getMinutes()) +
       "00"
     );
+  }
+
+  // 分(0-1440)をその日基準のDateへ。終了24:00(=1440分)は翌日00:00へ正しく繰り上がる。
+  function dateFromSelection(selection, minutes) {
+    const parts = selection.dateKey.split("-").map(Number);
+    const date = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
+    date.setMinutes(date.getMinutes() + minutes);
+    return date;
+  }
+
+  async function loadConfig() {
+    let config;
+    try {
+      config = await chrome.runtime.sendMessage({ type: "CSC_GET_CONFIG" });
+    } catch (error) {
+      config = null;
+    }
+    if (!config || !config.ok) return;
+    if (redirectUriEl) redirectUriEl.textContent = config.redirectUri || "";
+    if (clientIdInputEl) clientIdInputEl.value = config.clientId || "";
+    setSettingsStatus(config.clientId ? "設定済み" : "未設定", Boolean(config.clientId));
+  }
+
+  async function onSaveClientId() {
+    if (!clientIdInputEl) return;
+    const value = clientIdInputEl.value.trim();
+    try {
+      await chrome.storage.local.set({ csc_client_id: value });
+      setSettingsStatus(value ? "保存しました ✓" : "クリアしました", Boolean(value));
+    } catch (error) {
+      setSettingsStatus("保存に失敗しました", false);
+    }
+  }
+
+  function setSettingsStatus(message, ok) {
+    if (!settingsStatusEl) return;
+    settingsStatusEl.textContent = message;
+    settingsStatusEl.classList.toggle("csc-settings-ok", Boolean(ok));
+  }
+
+  function openSettings() {
+    if (settingsBodyEl) settingsBodyEl.style.display = "block";
   }
 
   async function copyText(text) {
