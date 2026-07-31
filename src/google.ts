@@ -181,3 +181,23 @@ export async function insertTask(
     throw new Error(`Tasks API insert error: ${res.status} ${await res.text()}`);
   }
 }
+
+/** 指定IDのタスクを完了状態にする。完了したタスクのタイトルを返す。 */
+export async function completeTask(accessToken: string, taskId: string): Promise<string> {
+  const res = await fetch(
+    `https://www.googleapis.com/tasks/v1/lists/@default/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status: "completed" }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Tasks API complete error: ${res.status} ${await res.text()}`);
+  }
+  const data = (await res.json()) as { title?: string };
+  return data.title ?? "(無題)";
+}

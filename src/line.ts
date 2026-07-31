@@ -38,6 +38,7 @@ export interface LineTextMessageEvent {
   replyToken?: string;
   source: { type: string; userId?: string };
   message?: { type: string; text?: string };
+  postback?: { data: string };
 }
 
 export interface LineWebhookBody {
@@ -70,5 +71,18 @@ export function pushText(accessToken: string, userId: string, text: string): Pro
   return callLineApi("/message/push", accessToken, {
     to: userId,
     messages: [{ type: "text", text }],
+  });
+}
+
+/** Flexメッセージ(ボタン付きカード)をreplyで送る。contentsはLINE Flexのbubble等。 */
+export function replyFlex(
+  accessToken: string,
+  replyToken: string,
+  altText: string,
+  contents: unknown
+): Promise<void> {
+  return callLineApi("/message/reply", accessToken, {
+    replyToken,
+    messages: [{ type: "flex", altText, contents }],
   });
 }

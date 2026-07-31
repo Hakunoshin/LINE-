@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { verifyLineSignature, replyText, pushText, type LineWebhookBody } from "./line";
+import { verifyLineSignature, replyText, pushText, replyFlex, type LineWebhookBody } from "./line";
 import {
   addReminder,
   listPendingReminders,
@@ -17,6 +17,7 @@ import {
   listTodayEvents,
   listIncompleteTasks,
   insertTask,
+  completeTask,
 } from "./google";
 import { handleWithAi } from "./ai";
 import { getTodayWeather } from "./weather";
@@ -65,6 +66,7 @@ const HELP_TEXT = [
   "・一覧  … 未通知のリマインダーを表示",
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
+  "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -119,11 +121,8 @@ app.post("/webhook", async (c) => {
   const body = JSON.parse(rawBody) as LineWebhookBody;
 
   for (const event of body.events) {
-    if (event.type !== "message" || event.message?.type !== "text" || !event.replyToken) {
-      continue;
-    }
     const userId = event.source.userId;
-    if (!userId) continue;
+    if (!userId || !event.replyToken) continue;
 
     if (c.env.ALLOWED_USER_ID && userId !== c.env.ALLOWED_USER_ID) {
       // 本人以外からのメッセージには応答しない
@@ -134,14 +133,45 @@ app.post("/webhook", async (c) => {
     // ALLOWED_USER_IDが未設定でも、一度でもメッセージを送れば自動配信が有効になる。
     await setAppState(c.env.DB, "owner_user_id", userId);
 
+    // ToDoの「完了」ボタン(ポストバック)を処理する
+    if (event.type === "postback" && event.postback) {
+      const reply = await handlePostback(c.env, event.postback.data);
+      await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
+      continue;
+    }
+
+    if (event.type !== "message" || event.message?.type !== "text") {
+      continue;
+    }
+
     const text = event.message.text ?? "";
     const baseUrl = new URL(c.req.url).origin;
     const reply = await handleCommand(c.env, userId, text, baseUrl);
-    await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
+    if (typeof reply === "string") {
+      await replyText(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply);
+    } else {
+      await replyFlex(c.env.LINE_CHANNEL_ACCESS_TOKEN, event.replyToken, reply.altText, reply.contents);
+    }
   }
 
   return c.text("ok");
 });
+
+// ToDo完了ボタンのポストバック(data="done:<taskId>")を処理する
+async function handlePostback(env: Env, data: string): Promise<string> {
+  if (data.startsWith("done:")) {
+    const taskId = data.slice("done:".length);
+    const accessToken = await getAccessTokenOrNull(env);
+    if (!accessToken) return "Googleと連携されていないため完了できませんでした。";
+    try {
+      const title = await completeTask(accessToken, taskId);
+      return `✅ 完了しました: ${title}`;
+    } catch (e) {
+      return `完了処理に失敗しました: ${(e as Error).message}`;
+    }
+  }
+  return "不明な操作です。";
+}
 
 // 自動配信(push)の送信先を決める。ALLOWED_USER_ID優先、無ければ記録済みのowner。
 async function getPushTargetUserId(env: Env): Promise<string | null> {
@@ -189,11 +219,78 @@ async function buildTodayDigest(accessToken: string): Promise<string> {
   return lines.join("\n");
 }
 
-async function handleCommand(env: Env, userId: string, text: string, baseUrl: string): Promise<string> {
+// コマンドの応答はテキストか、ボタン付きFlexメッセージのどちらか
+type CommandReply = string | { altText: string; contents: unknown };
+
+// 未完了ToDoを「完了」ボタン付きのFlexメッセージに組み立てる
+const FLEX_TASK_LIMIT = 20;
+function buildTaskListFlex(tasks: { id: string; title: string }[]): { altText: string; contents: unknown } {
+  const shown = tasks.slice(0, FLEX_TASK_LIMIT);
+  const rows: unknown[] = [];
+  for (const t of shown) {
+    rows.push({
+      type: "box",
+      layout: "horizontal",
+      spacing: "sm",
+      margin: "md",
+      alignItems: "center",
+      contents: [
+        { type: "text", text: t.title, wrap: true, size: "sm", flex: 5, gravity: "center" },
+        {
+          type: "button",
+          style: "primary",
+          color: "#22aa66",
+          height: "sm",
+          flex: 3,
+          action: {
+            type: "postback",
+            label: "完了",
+            data: `done:${t.id}`,
+            displayText: `完了: ${t.title}`,
+          },
+        },
+      ],
+    });
+  }
+  if (tasks.length > FLEX_TASK_LIMIT) {
+    rows.push({ type: "text", text: `ほか${tasks.length - FLEX_TASK_LIMIT}件`, size: "xs", color: "#999999", margin: "md" });
+  }
+
+  const contents = {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      contents: [
+        { type: "text", text: "未完了のToDo", weight: "bold", size: "lg" },
+        { type: "separator", margin: "md" },
+        ...rows,
+      ],
+    },
+  };
+  return { altText: "未完了のToDo一覧", contents };
+}
+
+async function handleCommand(env: Env, userId: string, text: string, baseUrl: string): Promise<CommandReply> {
   const trimmed = text.trim();
 
   if (trimmed === "ヘルプ" || trimmed === "help") {
     return HELP_TEXT;
+  }
+
+  if (trimmed === "完了" || trimmed === "todo" || trimmed === "ToDo") {
+    const accessToken = await getAccessTokenOrNull(env);
+    if (!accessToken) {
+      return `Googleと連携されていません。\n${baseUrl}/oauth/start から連携してください。`;
+    }
+    try {
+      const tasks = await listIncompleteTasks(accessToken);
+      if (tasks.length === 0) return "未完了のToDoはありません。";
+      return buildTaskListFlex(tasks);
+    } catch (e) {
+      return `ToDoの取得に失敗しました: ${(e as Error).message}`;
+    }
   }
 
   if (trimmed === "一覧" || trimmed === "リスト") {
