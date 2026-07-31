@@ -14,15 +14,23 @@ function client(apiKey: string): Anthropic {
 export type CtaType = "dm" | "comment";
 
 const CTA_INSTRUCTION: Record<CtaType, string> = {
-  dm: "末尾は、興味を持った人に『DM』で連絡するよう促す一文で締める(例: 気になる方はお気軽にDMください📩)。",
+  dm: "末尾は、興味を持った人に『DM』で連絡するよう促す一文で締める(例: 気になる方はお気軽にDMください)。",
   comment:
-    "末尾は、興味を持った人に『コメント』で一言もらうよう促す一文で締める(例: 気になる方はコメントに『詳細希望』と一言ください💬)。",
+    "末尾は、興味を持った人に『コメント』で一言もらうよう促す一文で締める(例: 気になる方はコメントに「詳細希望」と一言ください)。",
 };
 
 const CTA_FALLBACK_TEXT: Record<CtaType, string> = {
-  dm: "気になる方はお気軽にDMください📩",
-  comment: "気になる方はコメントに「詳細希望」と一言ください💬",
+  dm: "気になる方はお気軽にDMください",
+  comment: "気になる方はコメントに「詳細希望」と一言ください",
 };
+
+// 絵文字・装飾記号(ダイヤ/星/矢印/幾何図形/囲み等)を除去する。日本語の約物・句読点は残す。
+const DECOR_RE =
+  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{25A0}-\u{25FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F1E6}-\u{1F1FF}\u{2605}\u{2606}\u{2665}\u{2764}]/gu;
+
+function stripDecor(s: string): string {
+  return s.replace(DECOR_RE, "").replace(/\s+/g, " ").trim();
+}
 
 // 企業名(および前後の「株式会社」等)を文中から除去する。
 function stripCompany(text: string, company: string): string {
@@ -70,7 +78,7 @@ function pickHook(text: string, company: string): string {
     const end = 8 + cut;
     seg = /[。．！!？?]/.test(seg[end]) ? seg.slice(0, end + 1) : seg.slice(0, end);
   }
-  seg = seg.replace(/[。．\s]+$/, "").trim();
+  seg = stripDecor(seg).replace(/[。．\s]+$/, "").trim();
   if (seg.length < 7) return "";
   if (/^(ポイント|PR|概要|募集|仕事内容)/i.test(seg)) return "";
   return snippet(seg, 44);
@@ -81,7 +89,7 @@ function extractAppealPhrases(text: string, company: string, n: number): string[
   if (!text) return [];
   return stripCompany(text, company)
     .split(/[\n。！!、／/｜|]|【[^】]*】|＜|＞|≪|≫|[◎●★☆◆▶✔✅☑🔶🔷🔸🔹＼]/)
-    .map((s) => s.replace(/^[\s：:・\-–—「」『』]+/, "").replace(/[「」『』]/g, "").trim())
+    .map((s) => stripDecor(s.replace(/^[\s：:・\-–—「」『』]+/, "").replace(/[「」『』]/g, "")))
     .filter(
       (s) =>
         s.length >= 7 &&
@@ -105,15 +113,15 @@ export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
     "注目の求人👀";
 
   const points: string[] = [];
-  if (job.annualSalary) points.push(`💰 想定年収 ${job.annualSalary}`);
+  if (job.annualSalary) points.push(`・想定年収 ${job.annualSalary}`);
   for (const phrase of extractAppealPhrases(appeal, job.company, 3)) {
     if (points.length >= 3) break;
-    if (!hook.includes(phrase)) points.push(`✅ ${phrase}`);
+    if (!hook.includes(phrase)) points.push(`・${phrase}`);
   }
-  if (points.length < 3 && job.holidays) points.push(`🗓 年間休日${job.holidays}日`);
-  if (points.length < 3 && /未経験|不問/.test(job.minQualification)) points.push("🔰 未経験歓迎");
+  if (points.length < 3 && job.holidays) points.push(`・年間休日${job.holidays}日`);
+  if (points.length < 3 && /未経験|不問/.test(job.minQualification)) points.push("・未経験歓迎");
 
-  const lines: string[] = [hook, "", ...points.slice(0, 3), "", CTA_FALLBACK_TEXT[cta], "", "#求人 #転職 #キャリア"];
+  const lines: string[] = [hook, "", ...points.slice(0, 3), "", CTA_FALLBACK_TEXT[cta]];
   return truncateForThreads(lines.join("\n"));
 }
 
@@ -138,13 +146,14 @@ export async function generateThreadsPostFromText(
     "- Threadsは短い投稿ほど伸びるので、全体を短くまとめる(目安150〜250文字、長くても300文字以内)。",
     "- 日本語。プレーンテキスト(Markdown記法は使わない)。",
     "- 1行目は最重要。求人票の『アピールポイント』の一番刺さる要素を活かして、思わず読みたくなる強いフックにする。",
-    "- そのあと訴求ポイントを3つ程度、箇条書き(絵文字1つ+短い一言)で。求人票に書かれた訴求文を引用・活用する。",
+    "- そのあと訴求ポイントを3つ程度、短い一言で。求人票に書かれた訴求文を引用・活用する。",
+    "- どの業界・職種の求人かが伝わるように、その業界ならではの魅力・訴求を選ぶ。毎回同じ型に流さず、求人ごとに表現を変えて『色』を出す。",
+    "- 絵文字・ハッシュタグ・装飾記号(★◎🔶等)は一切使わない。人が書いた自然な日本語にする。",
     "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
     "- 企業名・会社名は本文に一切出さない。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
     "- 勤務地・住所は入れない。",
     bannedCompany ? `- 特に「${bannedCompany}」という固有名詞は絶対に本文に含めない。` : "",
     `- ${CTA_INSTRUCTION[cta]}`,
-    "- CTAの直後に関連ハッシュタグを3〜4個。",
     "- 出力は投稿本文のみ。前置き・説明・コードブロックは不要。",
   ]
     .filter(Boolean)
