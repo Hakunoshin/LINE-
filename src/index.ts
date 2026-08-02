@@ -799,12 +799,30 @@ async function runThreadsInsightsIfDue(env: Env): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runReminderCheck(env));
-    ctx.waitUntil(runDailyDigestIfDue(env));
-    ctx.waitUntil(runProposalPrepIfDue(env));
-    ctx.waitUntil(runInterviewPrepIfDue(env));
-    ctx.waitUntil(runTomorrowPreviewIfDue(env));
-    ctx.waitUntil(runThreadsAutoPostIfDue(env));
-    ctx.waitUntil(runThreadsInsightsIfDue(env));
+    // 全ての定期処理を1つのwaitUntilで「順番に」実行する。
+    // 以前は個別のwaitUntilで並行実行しており、リマインダー/ダイジェスト等の負荷で
+    // Workerの実行枠を使い切ると、末尾に置かれたThreads処理が実行されないことがあった。
+    // Threads自動投稿を最優先(先頭)にして、確実に実行されるようにする。
+    // 各処理は個別にcatchし、1つ失敗しても後続を止めない。
+    ctx.waitUntil(
+      (async () => {
+        const tasks: Array<[string, () => Promise<void>]> = [
+          ["threads_autopost", () => runThreadsAutoPostIfDue(env)],
+          ["threads_insights", () => runThreadsInsightsIfDue(env)],
+          ["reminders", () => runReminderCheck(env)],
+          ["daily_digest", () => runDailyDigestIfDue(env)],
+          ["proposal_prep", () => runProposalPrepIfDue(env)],
+          ["interview_prep", () => runInterviewPrepIfDue(env)],
+          ["tomorrow_preview", () => runTomorrowPreviewIfDue(env)],
+        ];
+        for (const [, run] of tasks) {
+          try {
+            await run();
+          } catch {
+            // 個別失敗は無視して次へ
+          }
+        }
+      })()
+    );
   },
 };
