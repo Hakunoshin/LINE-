@@ -19,10 +19,32 @@ const CTA_INSTRUCTION: Record<CtaType, string> = {
     "末尾は、興味を持った人に『コメント』で一言もらうよう促す一文で締める(例: 気になる方はコメントに「詳細希望」と一言ください)。",
 };
 
-const CTA_FALLBACK_TEXT: Record<CtaType, string> = {
-  dm: "気になる方はお気軽にDMください",
-  comment: "気になる方はコメントに「詳細希望」と一言ください",
+// テンプレ投稿のCTAは複数パターンから求人ごとに選び、定型感を減らす。
+const CTA_FALLBACK_VARIANTS: Record<CtaType, string[]> = {
+  dm: [
+    "少しでも気になったら、気軽にDMください。",
+    "話だけ聞いてみたい方も、DMお待ちしてます。",
+    "詳しく知りたい方はDMどうぞ。",
+    "ピンと来た方は、DMで聞いてください。",
+  ],
+  comment: [
+    "気になる方は「詳細希望」とコメントください。",
+    "興味がある方は、コメントで一言どうぞ。",
+    "もっと知りたい方は、コメントで教えてください。",
+    "ピンと来た方は、コメントで反応もらえたら嬉しいです。",
+  ],
 };
+
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function pickCtaText(cta: CtaType, seed: string): string {
+  const arr = CTA_FALLBACK_VARIANTS[cta];
+  return arr[hashString(seed) % arr.length];
+}
 
 // 絵文字・装飾記号(ダイヤ/星/矢印/幾何図形/囲み等)を除去する。日本語の約物・句読点は残す。
 const DECOR_RE =
@@ -102,26 +124,30 @@ function extractAppealPhrases(text: string, company: string, n: number): string[
 }
 
 // APIキーが無い/生成に失敗したときのテンプレート投稿。
-// 1行目は求人票の訴求文から作った刺さるフック、続けて想定年収＋求人票から引用した訴求ポイント。
-// Threadsは短い方が伸びるため簡潔に。勤務地・企業名は入れない。
+// 箇条書きの型感を減らすため、フック＋引用1つ＋条件を1行＋CTA(複数パターン)で構成する。
+// 勤務地・企業名・絵文字・ハッシュタグは入れない。
 export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
   const appeal = job.appealingPoints || "";
   const hook =
     pickHook(appeal, job.company) ||
     pickHook(job.description, job.company) ||
     shortHook(job.title, job.company) ||
-    "注目の求人👀";
+    "注目の求人";
 
-  const points: string[] = [];
-  if (job.annualSalary) points.push(`・想定年収 ${job.annualSalary}`);
-  for (const phrase of extractAppealPhrases(appeal, job.company, 3)) {
-    if (points.length >= 3) break;
-    if (!hook.includes(phrase)) points.push(`・${phrase}`);
-  }
-  if (points.length < 3 && job.holidays) points.push(`・年間休日${job.holidays}日`);
-  if (points.length < 3 && /未経験|不問/.test(job.minQualification)) points.push("・未経験歓迎");
+  const lines: string[] = [hook, ""];
 
-  const lines: string[] = [hook, "", ...points.slice(0, 3), "", CTA_FALLBACK_TEXT[cta]];
+  // 求人票の訴求文を1つだけ引用(箇条書きにせず自然な行として)。
+  const phrase = extractAppealPhrases(appeal, job.company, 3).find((p) => !hook.includes(p));
+  if (phrase) lines.push(phrase);
+
+  // 条件は1行にまとめる(箇条書きにしない)。
+  const cond: string[] = [];
+  if (job.annualSalary) cond.push(`想定年収 ${job.annualSalary}`);
+  if (job.holidays) cond.push(`年間休日${job.holidays}日`);
+  if (/未経験|不問/.test(job.minQualification)) cond.push("未経験歓迎");
+  if (cond.length) lines.push(cond.join(" / "));
+
+  lines.push("", pickCtaText(cta, hook));
   return truncateForThreads(lines.join("\n"));
 }
 
