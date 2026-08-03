@@ -63,7 +63,7 @@ export interface Env {
   // ===== X(旧Twitter)自動運用チーム =====
   // 発信テーマ(未設定なら「転職・キャリア」)
   X_TOPIC?: string;
-  // 投稿案を自動生成してLINEに送る時刻(JST, "HH:MM"。未設定なら08:00)
+  // 投稿案を自動生成してLINEに送る時刻(JST, "HH:MM"のカンマ区切りで複数可。未設定なら08:00,12:00,17:00,21:00)
   X_GENERATE_TIME_JST?: string;
   // 1回の自動生成で作る投稿案の件数(未設定なら3, 最大5)
   X_DRAFTS_PER_RUN?: string;
@@ -78,15 +78,21 @@ const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
 
 // ===== X運用チームの既定値 =====
 const X_DEFAULT_TOPIC = "転職・キャリア";
-const X_DEFAULT_GENERATE_TIME = "08:00";
+const X_DEFAULT_GENERATE_TIMES = ["08:00", "12:00", "17:00", "21:00"];
 const X_DEFAULT_PER_RUN = 3;
 const X_MAX_PER_RUN = 5;
 
 function xTopic(env: Env): string {
   return env.X_TOPIC?.trim() || X_DEFAULT_TOPIC;
 }
-function xGenerateTime(env: Env): string {
-  return env.X_GENERATE_TIME_JST?.trim() || X_DEFAULT_GENERATE_TIME;
+function xGenerateTimes(env: Env): string[] {
+  const raw = env.X_GENERATE_TIME_JST?.trim();
+  if (!raw) return X_DEFAULT_GENERATE_TIMES;
+  const times = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return times.length > 0 ? times : X_DEFAULT_GENERATE_TIMES;
 }
 function xPerRun(env: Env): number {
   const n = Number(env.X_DRAFTS_PER_RUN);
@@ -437,7 +443,7 @@ async function handleXCommand(env: Env, userId: string, trimmed: string): Promis
     return buildXSettingsText(seeds, {
       apiConnected: getXCredentials(env) !== null,
       topic: xTopic(env),
-      generateTime: xGenerateTime(env),
+      generateTime: xGenerateTimes(env).join(" / "),
       perRun: xPerRun(env),
     });
   }
@@ -465,7 +471,14 @@ async function handleXCommand(env: Env, userId: string, trimmed: string): Promis
     return ok ? `ネタ元 #${id} を削除しました。` : `#${id} は見つかりませんでした。`;
   }
 
-  if (trimmed === "X案" || trimmed === "x案" || trimmed === "Xネタ" || trimmed === "xネタ") {
+  if (
+    trimmed === "X案" ||
+    trimmed === "x案" ||
+    trimmed === "Xネタ" ||
+    trimmed === "xネタ" ||
+    trimmed === "Xテスト" ||
+    trimmed === "xテスト"
+  ) {
     if (!env.ANTHROPIC_API_KEY) return "AI(ANTHROPIC_API_KEY)が未設定のため投稿案を作れません。";
     const n = await generateAndDeliverXDrafts(env, userId, xPerRun(env));
     return n > 0
@@ -795,30 +808,32 @@ async function runInterviewPrepIfDue(env: Env): Promise<void> {
   }
 }
 
-// 毎日決まった時刻(既定08:00 JST)に、登録済みネタ元から投稿案を自動生成してLINEに送る。
-// ネタ元が未登録の場合は送らない(意図しない自動投稿案を防ぐ)。
+// 毎日決まった時刻(既定 08:00/12:00/17:00/21:00 JST)に、登録済みネタ元から
+// 投稿案を自動生成してLINEに送る。ネタ元が未登録の場合は送らない(意図しない自動投稿案を防ぐ)。
 async function runXDailyGenerateIfDue(env: Env): Promise<void> {
   const now = new Date();
-  if (currentJstHm(now) !== xGenerateTime(env)) return;
+  const nowHm = currentJstHm(now);
+  if (!xGenerateTimes(env).includes(nowHm)) return;
   if (!env.ANTHROPIC_API_KEY) return;
 
   const target = await getPushTargetUserId(env);
   if (!target) return;
 
-  const todayKey = jstDateKey(now);
-  const lastKey = await getAppState(env.DB, "last_x_generate_date");
-  if (lastKey === todayKey) return; // その日は生成済み
+  // 「日付+時刻」単位で生成済みかを記録し、同じ時刻枠での二重生成(cron再試行等)を防ぐ
+  const slotKey = `${jstDateKey(now)} ${nowHm}`;
+  const lastKey = await getAppState(env.DB, "last_x_generate_slot");
+  if (lastKey === slotKey) return;
 
   const seeds = await listXSeeds(env.DB, target);
   if (seeds.length === 0) {
-    // ネタ元が無ければ自動生成はしない。処理済みとして記録し翌日まで再実行しない。
-    await setAppState(env.DB, "last_x_generate_date", todayKey);
+    // ネタ元が無ければ自動生成はしない。処理済みとして記録し同じ枠で再実行しない。
+    await setAppState(env.DB, "last_x_generate_slot", slotKey);
     return;
   }
 
   try {
     await generateAndDeliverXDrafts(env, target, xPerRun(env));
-    await setAppState(env.DB, "last_x_generate_date", todayKey);
+    await setAppState(env.DB, "last_x_generate_slot", slotKey);
   } catch {
     // 失敗時はstate未更新のまま次の分に再試行される
   }

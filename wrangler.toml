@@ -22,8 +22,8 @@ WEATHER_LOCATION_NAME = "東京"
 # ===== X(旧Twitter)自動運用チーム =====
 # 発信テーマ(集客の軸)。
 X_TOPIC = "転職・キャリア"
-# 投稿案を自動生成してLINEに送る時刻(JST)。
-X_GENERATE_TIME_JST = "08:00"
+# 投稿案を自動生成してLINEに送る時刻(JST)。"HH:MM"のカンマ区切りで複数指定可。
+X_GENERATE_TIME_JST = "08:00,12:00,17:00,21:00"
 # 1回の自動生成でつくる投稿案の件数(最大5)。
 X_DRAFTS_PER_RUN = "3"
 # X APIキー(X_API_KEY / X_API_SECRET / X_ACCESS_TOKEN / X_ACCESS_TOKEN_SECRET)は
