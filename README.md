@@ -51,6 +51,52 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
 
+### X自動運用チーム（任意 / 集客向け）
+
+`ANTHROPIC_API_KEY` を設定すると、**X（旧Twitter）の投稿を「リサーチ → バズの型を分析 → 集客用のオリジナル投稿を作成 → LINEで承認 → Xへ投稿」まで半自動化**できます。転職エージェントの集客のように「バズっている投稿を参考に、自分の投稿を作って運用する」用途を想定しています。
+
+チーム（Claude）は次の役割で連携して投稿案を作ります。
+
+- **リサーチャー**: 登録したネタ元（参考アカウント／キーワード／貼り付けたバズ投稿）から、その界隈で伸びる投稿の「型」を捉える
+- **アナリスト**: なぜ伸びるのか・どの層に刺さるのかを言語化
+- **ライター**: 型だけ借りて（丸写しはしない）、集客導線つきのオリジナル投稿を作成
+
+作られた投稿案はLINEに**承認ボタン付きカード**で届き、あなたが「承認／別案／却下」を選びます。承認した投稿だけがXに出ます（X API未連携なら本文が届くので手動コピー投稿、連携済みなら自動投稿）。
+
+#### 使い方（LINEのトーク）
+
+```
+Xヘルプ                … X運用チームの使い方
+Xアカウント @example    … 参考にする発信者を登録
+Xキーワード 20代 転職    … テーマ/キーワードを登録
+X案                    … いま投稿案を作ってLINEに送る（承認待ち）
+Xキュー                … 承認待ち/投稿待ちの一覧
+X設定                  … ネタ元・連携状況の確認
+Xネタ元削除 3          … 登録したネタ元を削除
+```
+
+- バズ投稿を**そのまま貼って**「これ参考に投稿作って」と送ると、その型でオリジナル案を生成します。
+- 承認はカードのボタンのほか、`X承認 12` / `X却下 12` / `X別案 12`（番号は投稿案ID）でも操作できます。
+- 毎日 `X_GENERATE_TIME_JST`（既定 08:00 JST）に、登録済みネタ元から `X_DRAFTS_PER_RUN`（既定3件）を自動生成してLINEに送ります（ネタ元未登録なら送りません）。
+
+#### Xへの自動投稿を有効にする（X APIキー）
+
+承認した投稿を**自動でX投稿**するには、[X Developer Portal](https://developer.x.com/) でアプリを作成し、以下を取得してSecretに登録します（OAuth 1.0a / 投稿には **Read and Write** 権限が必要）。X APIの投稿は有料プランが必要な場合があります。
+
+1. Developer Portalでプロジェクト/アプリを作成
+2. アプリの「User authentication settings」で **App permissions: Read and Write** を設定
+3. **API Key / API Key Secret**（=Consumer Keys）を控える
+4. 「Keys and tokens」で **Access Token / Access Token Secret** を生成（Read and Write のものを）
+
+```bash
+npx wrangler secret put X_API_KEY
+npx wrangler secret put X_API_SECRET
+npx wrangler secret put X_ACCESS_TOKEN
+npx wrangler secret put X_ACCESS_TOKEN_SECRET
+```
+
+4つすべて登録されると、承認時にXへ自動投稿します。未登録のうちは、承認すると投稿本文がLINEに届くので手動でコピー投稿してください（機能はキーなしでも使えます）。発信テーマや自動生成の時刻・件数は `wrangler.toml` の `X_TOPIC` / `X_GENERATE_TIME_JST` / `X_DRAFTS_PER_RUN` で変更できます。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成
@@ -144,12 +190,14 @@ Cloudflare Tunnel等でローカルサーバーを公開し、一時的にWebhoo
 src/
   index.ts               Honoアプリ本体。Webhook処理・OAuthルート・Cron Trigger
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
+  x.ts                   X自動運用チーム(投稿案生成パイプライン・X API投稿・LINE承認カード)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
+  db.ts                  D1へのリマインダー・Googleトークン・会話履歴・X運用のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
+  0004_x_operation.sql   x_seeds / x_drafts テーブルのスキーマ(X自動運用)
 ```

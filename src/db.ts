@@ -148,3 +148,142 @@ export async function setAppState(db: D1Database, key: string, value: string): P
     .bind(key, value)
     .run();
 }
+
+// ===== X(旧Twitter)自動運用チーム =====
+
+export type XSeedKind = "account" | "keyword" | "reference";
+
+export interface XSeed {
+  id: number;
+  user_id: string;
+  kind: XSeedKind;
+  value: string;
+  created_at: string;
+}
+
+export async function addXSeed(
+  db: D1Database,
+  userId: string,
+  kind: XSeedKind,
+  value: string
+): Promise<number> {
+  const result = await db
+    .prepare("INSERT INTO x_seeds (user_id, kind, value) VALUES (?, ?, ?)")
+    .bind(userId, kind, value)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+export async function listXSeeds(db: D1Database, userId: string): Promise<XSeed[]> {
+  const result = await db
+    .prepare("SELECT * FROM x_seeds WHERE user_id = ? ORDER BY kind ASC, id ASC")
+    .bind(userId)
+    .all<XSeed>();
+  return result.results ?? [];
+}
+
+export async function deleteXSeed(db: D1Database, userId: string, id: number): Promise<boolean> {
+  const result = await db
+    .prepare("DELETE FROM x_seeds WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export type XDraftStatus = "pending" | "approved" | "posted" | "rejected";
+
+export interface XDraft {
+  id: number;
+  user_id: string;
+  content: string;
+  rationale: string | null;
+  status: XDraftStatus;
+  scheduled_at: string | null;
+  posted_at: string | null;
+  source_note: string | null;
+  created_at: string;
+}
+
+export async function addXDraft(
+  db: D1Database,
+  userId: string,
+  content: string,
+  rationale: string | null,
+  sourceNote: string | null
+): Promise<number> {
+  const result = await db
+    .prepare(
+      "INSERT INTO x_drafts (user_id, content, rationale, status, source_note) VALUES (?, ?, ?, 'pending', ?)"
+    )
+    .bind(userId, content, rationale, sourceNote)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+export async function getXDraft(db: D1Database, userId: string, id: number): Promise<XDraft | null> {
+  const result = await db
+    .prepare("SELECT * FROM x_drafts WHERE id = ? AND user_id = ?")
+    .bind(id, userId)
+    .first<XDraft>();
+  return result ?? null;
+}
+
+export async function listXDraftsByStatus(
+  db: D1Database,
+  userId: string,
+  statuses: XDraftStatus[]
+): Promise<XDraft[]> {
+  if (statuses.length === 0) return [];
+  const placeholders = statuses.map(() => "?").join(", ");
+  const result = await db
+    .prepare(
+      `SELECT * FROM x_drafts WHERE user_id = ? AND status IN (${placeholders}) ORDER BY id ASC`
+    )
+    .bind(userId, ...statuses)
+    .all<XDraft>();
+  return result.results ?? [];
+}
+
+/** 承認して投稿予定時刻をセットする(status=approved)。 */
+export async function approveXDraft(
+  db: D1Database,
+  userId: string,
+  id: number,
+  scheduledAtUtcIso: string
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      "UPDATE x_drafts SET status = 'approved', scheduled_at = ? WHERE id = ? AND user_id = ? AND status = 'pending'"
+    )
+    .bind(scheduledAtUtcIso, id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function rejectXDraft(db: D1Database, userId: string, id: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      "UPDATE x_drafts SET status = 'rejected' WHERE id = ? AND user_id = ? AND status = 'pending'"
+    )
+    .bind(id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/** 投稿予定時刻を過ぎた承認済みドラフトを取得する(自動投稿cron用)。 */
+export async function getDueApprovedXDrafts(db: D1Database, nowUtcIso: string): Promise<XDraft[]> {
+  const result = await db
+    .prepare(
+      "SELECT * FROM x_drafts WHERE status = 'approved' AND scheduled_at IS NOT NULL AND scheduled_at <= ? ORDER BY scheduled_at ASC"
+    )
+    .bind(nowUtcIso)
+    .all<XDraft>();
+  return result.results ?? [];
+}
+
+export async function markXDraftPosted(db: D1Database, id: number, postedAtUtcIso: string): Promise<void> {
+  await db
+    .prepare("UPDATE x_drafts SET status = 'posted', posted_at = ? WHERE id = ?")
+    .bind(postedAtUtcIso, id)
+    .run();
+}

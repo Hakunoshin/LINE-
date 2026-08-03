@@ -86,3 +86,16 @@ export function replyFlex(
     messages: [{ type: "flex", altText, contents }],
   });
 }
+
+/** Flexメッセージ(ボタン付きカード)をpushで送る。自動配信からドラフト承認カードを送る用。 */
+export function pushFlex(
+  accessToken: string,
+  userId: string,
+  altText: string,
+  contents: unknown
+): Promise<void> {
+  return callLineApi("/message/push", accessToken, {
+    to: userId,
+    messages: [{ type: "flex", altText, contents }],
+  });
+}

@@ -16,6 +16,9 @@ export interface AiContext {
   userId: string;
   googleAccessToken: string | null;
   buildTodayDigest: (accessToken: string) => Promise<string>;
+  // X運用チーム: 参考投稿(reference)や登録済みネタ元からX投稿案を生成し、承認カードをLINEへ送る。
+  // 生成できた件数などのサマリー文字列を返す。未設定(null)ならX機能は使えない。
+  draftXPosts: ((reference: string | undefined) => Promise<string>) | null;
 }
 
 const TOOLS: Anthropic.Tool[] = [
@@ -54,6 +57,21 @@ const TOOLS: Anthropic.Tool[] = [
     description:
       "Googleカレンダーの今日の予定とGoogle Tasksの未完了ToDoの一覧を取得する。今日の予定・タスクについて聞かれたときに呼ぶ。",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "draft_x_post",
+    description:
+      "X(旧Twitter)の投稿案を作成する。ユーザーがバズ投稿を貼って「これ参考に投稿作って」等と言ったとき、または「X投稿作って/ネタ出して」等と依頼したときに呼ぶ。生成した案はLINEに承認ボタン付きカードで届く(このツールは件数のサマリーだけ返す)。",
+    input_schema: {
+      type: "object",
+      properties: {
+        reference: {
+          type: "string",
+          description:
+            "参考にするバズ投稿の本文(ユーザーが貼った場合)。型だけ参考にする。無ければ省略し、登録済みネタ元から生成する。",
+        },
+      },
+    },
   },
 ];
 
@@ -102,6 +120,17 @@ async function executeTool(ctx: AiContext, name: string, input: Record<string, u
         return `取得に失敗しました: ${(e as Error).message}`;
       }
     }
+    case "draft_x_post": {
+      if (!ctx.draftXPosts) {
+        return "X運用機能が使えません(ANTHROPIC_API_KEYの設定を確認してください)。";
+      }
+      const reference = typeof input.reference === "string" && input.reference.trim() ? input.reference.trim() : undefined;
+      try {
+        return await ctx.draftXPosts(reference);
+      } catch (e) {
+        return `投稿案の生成に失敗しました: ${(e as Error).message}`;
+      }
+    }
     default:
       return `エラー: 不明なツール ${name}`;
   }
@@ -115,6 +144,7 @@ function buildSystemPrompt(): string {
     "役割:",
     "- リマインダー/タスクの登録・確認・削除(ツールを使う)",
     "- 今日の予定・ToDoの確認(ツールを使う)",
+    "- X(旧Twitter)の投稿案づくり(集客目的)。バズ投稿を貼られたり投稿作成を頼まれたら draft_x_post を使う",
     "- それ以外の質問や雑談にも普通に応じる",
     "",
     "返信のルール:",
