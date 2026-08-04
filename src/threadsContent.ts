@@ -106,6 +106,31 @@ function pickHook(text: string, company: string): string {
   return snippet(seg, 44);
 }
 
+// 仕事内容(jobDescriptions)から「実際に何をやる仕事か」の1文を取り出す。会社ごとの色を出す。
+function jobSummary(text: string, company: string): string {
+  if (!text) return "";
+  let t = stripDecor(stripCompany(text, company)).replace(/�/g, "").trim();
+  let prev = "";
+  do {
+    prev = t;
+    t = t.replace(/^[\s＼／\\｜|・:：\-–—「」『』（）()]+/, "");
+    t = t.replace(
+      /^(?:【[^】]{0,18}】|＜[^＞]{0,18}＞|≪[^≫]{0,18}≫|具体的には|具体的に|仕事内容|職務内容|業務内容)[…：:!！]?\s*/i,
+      ""
+    );
+  } while (t !== prev);
+  t = t.trim();
+  if (!t) return "";
+  // 途中に「具体的な仕事内容」等の見出しが来たらそこで切る。
+  const hdr = t.search(/(具体的な仕事内容|具体的には|職務内容|業務内容)/);
+  let seg = hdr > 12 ? t.slice(0, hdr) : t.slice(0, 64);
+  const cut = seg.slice(12).search(/[。！!]/);
+  if (cut >= 0) seg = seg.slice(0, 12 + cut + 1);
+  seg = seg.replace(/[。\s]+$/, "").trim();
+  if (seg.length < 8) return "";
+  return snippet(seg, 56);
+}
+
 // アピール本文から、求人票に書かれた訴求フレーズを最大n個抽出する(引用に使う)。
 function extractAppealPhrases(text: string, company: string, n: number): string[] {
   if (!text) return [];
@@ -136,9 +161,11 @@ export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
 
   const lines: string[] = [hook, ""];
 
-  // 求人票の訴求文を1つだけ引用(箇条書きにせず自然な行として)。
-  const phrase = extractAppealPhrases(appeal, job.company, 3).find((p) => !hook.includes(p));
-  if (phrase) lines.push(phrase);
+  // 「実際に何をやる仕事か」を1行入れて会社ごとの色を出す。無ければ訴求文で代替。
+  const body =
+    jobSummary(job.description, job.company) ||
+    extractAppealPhrases(appeal, job.company, 3).find((p) => !hook.includes(p));
+  if (body && !hook.includes(body)) lines.push(body);
 
   // 条件は1行にまとめる(箇条書きにしない)。
   const cond: string[] = [];
@@ -172,8 +199,9 @@ export async function generateThreadsPostFromText(
     "- Threadsは短い投稿ほど伸びるので、全体を短くまとめる(目安150〜250文字、長くても300文字以内)。",
     "- 日本語。プレーンテキスト(Markdown記法は使わない)。",
     "- 1行目は最重要。求人票の『アピールポイント』の一番刺さる要素を活かして、思わず読みたくなる強いフックにする。",
-    "- そのあと訴求ポイントを3つ程度、短い一言で。求人票に書かれた訴求文を引用・活用する。",
-    "- どの業界・職種の求人かが伝わるように、その業界ならではの魅力・訴求を選ぶ。毎回同じ型に流さず、求人ごとに表現を変えて『色』を出す。",
+    "- 『実際に何をやる仕事か(業務内容)』を具体的に1〜2文で入れる。ここで会社ごとの色を出す(例:全国のイベント会場でPR/ジュエリーの査定・買取/都内でのタクシー乗務 など)。",
+    "- 加えて訴求ポイントを2つ程度、短い一言で。求人票に書かれた訴求文を活用する。",
+    "- どの業界・職種の求人かが一目で伝わるようにする。毎回同じ型に流さず、求人ごとに表現を変えて『色』を出す。",
     "- 絵文字・ハッシュタグ・装飾記号(★◎🔶等)は一切使わない。人が書いた自然な日本語にする。",
     "- 求人事実の誇張・捏造は禁止。与えられた求人票の情報の範囲で書く。",
     "- 企業名・会社名は本文に一切出さない。必要なら『上場企業グループ』『業界大手』等に匿名化する。",
