@@ -51,6 +51,42 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
 
+### Threads（別アカウント）自動投稿（任意）
+
+Meta（Threads）のアプリを連携すると、**このLINEエージェントとは別のアカウント**のThreadsへ、
+LINEから予約投稿・自動投稿できるようになります。指定した時刻になると Cron Trigger が自動で公開します。
+
+LINEのトークで使えるコマンド:
+
+```
+スレッド予約 明日9:00 おはようございます      # 本文と日時を指定して予約
+スレッド生成 明日12:00 今日の一言             # AIが本文を作成して予約（要 ANTHROPIC_API_KEY）
+スレッド投稿 いますぐ投稿する本文             # その場ですぐ投稿
+スレッド一覧                                  # 予約中の投稿を確認
+スレッド削除 3                                # 予約を取り消し
+```
+
+日時の指定はリマインダーと同じ形式（`今日/明日/明後日` `HH:MM` `YYYY-MM-DD` `M/D` など）です。
+予約は毎分のCronでチェックされ、時刻を過ぎたものが自動公開されます。公開に成功/失敗すると、
+その結果とパーマリンクがLINEにも通知されます（テキスト投稿は最大500文字）。
+
+#### セットアップ
+
+1. [Meta for Developers](https://developers.facebook.com/) でアプリを作成し、**Threads API** のユースケースを追加する
+2. 「Threads > 設定」でリダイレクトコールバックURLに `<デプロイURL>/threads/oauth/callback` を登録する
+   （例: `https://personal-line-agent.<your-subdomain>.workers.dev/threads/oauth/callback`）
+3. スコープ `threads_basic` と `threads_content_publish` を有効にする
+4. アプリの **Threads App ID** と **Threads App Secret** を控えて設定する
+
+```bash
+npx wrangler secret put THREADS_APP_ID
+npx wrangler secret put THREADS_APP_SECRET
+```
+
+5. **投稿したいアカウント**でブラウザから `<デプロイURL>/threads/oauth/start` にアクセスして認可する
+   （開発中のアプリの場合は、そのアカウントをMeta側でテスターとして追加しておく必要があります）。
+   「Threads連携が完了しました」と表示されれば成功です（長期トークンがD1に保存され、自動で更新されます）。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成
@@ -143,13 +179,15 @@ Cloudflare Tunnel等でローカルサーバーを公開し、一時的にWebhoo
 ```
 src/
   index.ts               Honoアプリ本体。Webhook処理・OAuthルート・Cron Trigger
-  ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
+  ai.ts                  Claude APIによる自由文応答エージェント(ツール付き) + Threads本文生成
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
+  threads.ts             Threads(Meta) OAuth2 / テキスト投稿クライアント
+  db.ts                  D1へのリマインダー・各種トークン・予約投稿・会話履歴のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
+  0004_threads.sql       threads_tokens / thread_posts テーブルのスキーマ
 ```

@@ -89,6 +89,130 @@ export async function saveGoogleAccessToken(
     .run();
 }
 
+// ---- Threads(Meta)連携 ----
+
+export interface ThreadsToken {
+  threads_user_id: string;
+  username: string | null;
+  access_token: string;
+  expires_at: string;
+}
+
+export async function getThreadsToken(db: D1Database): Promise<ThreadsToken | null> {
+  const result = await db
+    .prepare(
+      "SELECT threads_user_id, username, access_token, expires_at FROM threads_tokens WHERE id = 1"
+    )
+    .first<ThreadsToken>();
+  return result ?? null;
+}
+
+export async function saveThreadsToken(
+  db: D1Database,
+  token: { threadsUserId: string; username: string | null; accessToken: string; expiresAtUtcIso: string }
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO threads_tokens (id, threads_user_id, username, access_token, expires_at, updated_at)
+       VALUES (1, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET
+         threads_user_id = excluded.threads_user_id,
+         username = excluded.username,
+         access_token = excluded.access_token,
+         expires_at = excluded.expires_at,
+         updated_at = datetime('now')`
+    )
+    .bind(token.threadsUserId, token.username, token.accessToken, token.expiresAtUtcIso)
+    .run();
+}
+
+/** アクセストークンだけを更新する(長期トークンのリフレッシュ時)。 */
+export async function updateThreadsAccessToken(
+  db: D1Database,
+  accessToken: string,
+  expiresAtUtcIso: string
+): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE threads_tokens SET access_token = ?, expires_at = ?, updated_at = datetime('now') WHERE id = 1"
+    )
+    .bind(accessToken, expiresAtUtcIso)
+    .run();
+}
+
+export interface ThreadPost {
+  id: number;
+  user_id: string;
+  text: string;
+  scheduled_at: string;
+  status: string;
+  posted_at: string | null;
+  permalink: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+export async function addThreadPost(
+  db: D1Database,
+  userId: string,
+  text: string,
+  scheduledAtUtcIso: string
+): Promise<number> {
+  const result = await db
+    .prepare("INSERT INTO thread_posts (user_id, text, scheduled_at) VALUES (?, ?, ?)")
+    .bind(userId, text, scheduledAtUtcIso)
+    .run();
+  return result.meta.last_row_id as number;
+}
+
+export async function listPendingThreadPosts(db: D1Database, userId: string): Promise<ThreadPost[]> {
+  const result = await db
+    .prepare(
+      "SELECT * FROM thread_posts WHERE user_id = ? AND status = 'pending' ORDER BY scheduled_at ASC"
+    )
+    .bind(userId)
+    .all<ThreadPost>();
+  return result.results ?? [];
+}
+
+export async function deleteThreadPost(db: D1Database, userId: string, id: number): Promise<boolean> {
+  const result = await db
+    .prepare("DELETE FROM thread_posts WHERE id = ? AND user_id = ? AND status = 'pending'")
+    .bind(id, userId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function getDueThreadPosts(db: D1Database, nowUtcIso: string): Promise<ThreadPost[]> {
+  const result = await db
+    .prepare(
+      "SELECT * FROM thread_posts WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC"
+    )
+    .bind(nowUtcIso)
+    .all<ThreadPost>();
+  return result.results ?? [];
+}
+
+export async function markThreadPostPosted(
+  db: D1Database,
+  id: number,
+  permalink: string | null
+): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE thread_posts SET status = 'posted', posted_at = datetime('now'), permalink = ?, error = NULL WHERE id = ?"
+    )
+    .bind(permalink, id)
+    .run();
+}
+
+export async function markThreadPostFailed(db: D1Database, id: number, error: string): Promise<void> {
+  await db
+    .prepare("UPDATE thread_posts SET status = 'failed', error = ? WHERE id = ?")
+    .bind(error.slice(0, 500), id)
+    .run();
+}
+
 export async function getAppState(db: D1Database, key: string): Promise<string | null> {
   const result = await db
     .prepare("SELECT value FROM app_state WHERE key = ?")

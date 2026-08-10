@@ -125,6 +125,33 @@ function buildSystemPrompt(): string {
   ].join("\n");
 }
 
+/**
+ * テーマからThreads投稿の本文をClaudeで生成する。
+ * 500文字以内・日本語・そのまま投稿できる完成文を返す(引用符や説明は付けない)。
+ */
+export async function generateThreadPost(apiKey: string, theme: string, limit: number): Promise<string> {
+  const client = new Anthropic({ apiKey });
+  const response = await client.messages.create({
+    model: "claude-opus-4-8",
+    max_tokens: 1024,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "low" },
+    system: [
+      "あなたはSNS(Threads)の投稿文を書くプロのコピーライターです。",
+      "与えられたテーマに沿って、そのまま投稿できる日本語の本文を1つだけ書いてください。",
+      `制約: ${limit}文字以内。読みやすく、冒頭で惹きつける。ハッシュタグは付けても2個まで。`,
+      "出力は本文のみ。前置き・説明・引用符・「投稿文:」等のラベルは一切付けないこと。",
+    ].join("\n"),
+    messages: [{ role: "user", content: `テーマ: ${theme}` }],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  return text.slice(0, limit);
+}
+
 /** 自由文メッセージをClaudeで処理して返信テキストを返す。 */
 export async function handleWithAi(apiKey: string, ctx: AiContext, userText: string): Promise<string> {
   const client = new Anthropic({ apiKey });

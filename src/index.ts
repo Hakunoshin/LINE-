@@ -8,6 +8,12 @@ import {
   markNotified,
   getAppState,
   setAppState,
+  addThreadPost,
+  listPendingThreadPosts,
+  deleteThreadPost,
+  getDueThreadPosts,
+  markThreadPostPosted,
+  markThreadPostFailed,
 } from "./db";
 import { parseReminderInput, formatJstDateTime, currentJstHm, jstDateKey, jstTodayRangeUtc, jstTomorrowRangeUtc, jstDateOnlyUtc } from "./dateParser";
 import {
@@ -19,8 +25,15 @@ import {
   insertTask,
   completeTask,
 } from "./google";
-import { handleWithAi } from "./ai";
+import { handleWithAi, generateThreadPost } from "./ai";
 import { getTodayWeather } from "./weather";
+import {
+  buildThreadsAuthUrl,
+  exchangeThreadsCode,
+  getValidThreadsToken,
+  publishTextPost,
+  THREADS_TEXT_LIMIT,
+} from "./threads";
 
 export interface Env {
   DB: D1Database;
@@ -40,6 +53,10 @@ export interface Env {
   WEATHER_LATITUDE?: string;
   WEATHER_LONGITUDE?: string;
   WEATHER_LOCATION_NAME?: string;
+  // Threads(Meta)連携。Meta for Developersで作成したThreadsアプリのID/Secret。
+  // 設定すると「別アカウント」のThreadsへ予約投稿・自動投稿できるようになる。
+  THREADS_APP_ID?: string;
+  THREADS_APP_SECRET?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -67,6 +84,13 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
+  "",
+  "＜Threads(別アカウント)自動投稿＞",
+  "・スレッド予約 <日時> <本文>  例) スレッド予約 明日9:00 おはようございます",
+  "・スレッド生成 <日時> <テーマ>  … AIが本文を作って予約 例) スレッド生成 明日12:00 今日の一言",
+  "・スレッド投稿 <本文>  … いますぐ投稿",
+  "・スレッド一覧 / スレッド削除 <ID>  … 予約の確認・取消",
+  "",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -108,6 +132,48 @@ app.get("/oauth/callback", async (c) => {
     return c.text(`Google連携に失敗しました: ${(e as Error).message}`, 500);
   }
   return c.text("Google連携が完了しました。このタブは閉じて大丈夫です。");
+});
+
+// ---- Threads(Meta) OAuth ----
+// 投稿したい「別アカウント」でこのURLにアクセスして認可する。
+app.get("/threads/oauth/start", (c) => {
+  const { THREADS_APP_ID } = c.env;
+  if (!THREADS_APP_ID) {
+    return c.text("THREADS_APP_ID が設定されていません。", 500);
+  }
+  const redirectUri = new URL("/threads/oauth/callback", c.req.url).toString();
+  return c.redirect(buildThreadsAuthUrl(THREADS_APP_ID, redirectUri));
+});
+
+app.get("/threads/oauth/callback", async (c) => {
+  const { THREADS_APP_ID, THREADS_APP_SECRET } = c.env;
+  if (!THREADS_APP_ID || !THREADS_APP_SECRET) {
+    return c.text("THREADS_APP_ID / THREADS_APP_SECRET が設定されていません。", 500);
+  }
+  const code = c.req.query("code");
+  const error = c.req.query("error_description") ?? c.req.query("error");
+  if (error) {
+    return c.text(`Threads認証がキャンセルまたは失敗しました: ${error}`, 400);
+  }
+  if (!code) {
+    return c.text("codeパラメータがありません。", 400);
+  }
+  const redirectUri = new URL("/threads/oauth/callback", c.req.url).toString();
+  try {
+    // Threadsはredirect_uriのcode末尾に "#_" が付与されることがあるため除去する
+    const cleanCode = code.replace(/#_$/, "");
+    const { username } = await exchangeThreadsCode(
+      THREADS_APP_ID,
+      THREADS_APP_SECRET,
+      redirectUri,
+      cleanCode,
+      c.env.DB
+    );
+    const who = username ? `@${username}` : "対象アカウント";
+    return c.text(`Threads連携が完了しました(${who})。このタブは閉じて大丈夫です。`);
+  } catch (e) {
+    return c.text(`Threads連携に失敗しました: ${(e as Error).message}`, 500);
+  }
 });
 
 app.post("/webhook", async (c) => {
@@ -365,6 +431,10 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     return `リマインダーを登録しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)} ${parsed.content}${googleNote}`;
   }
 
+  if (trimmed.startsWith("スレッド")) {
+    return await handleThreadsCommand(env, userId, trimmed, baseUrl);
+  }
+
   // コマンドに一致しない自由文はClaude(AI)が処理する
   if (env.ANTHROPIC_API_KEY) {
     try {
@@ -381,6 +451,137 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
   }
 
   return `コマンドを認識できませんでした。\n\n${HELP_TEXT}`;
+}
+
+// Threads関連コマンド(「スレッド〜」)を処理する。
+async function handleThreadsCommand(
+  env: Env,
+  userId: string,
+  trimmed: string,
+  baseUrl: string
+): Promise<CommandReply> {
+  if (!env.THREADS_APP_ID || !env.THREADS_APP_SECRET) {
+    return "Threads連携が未設定です。THREADS_APP_ID / THREADS_APP_SECRET を設定してください。";
+  }
+  const notConnected = `Threadsと連携されていません。\n投稿したいアカウントで ${baseUrl}/threads/oauth/start にアクセスして連携してください。`;
+
+  // 予約一覧
+  if (trimmed === "スレッド一覧" || trimmed === "スレッドリスト") {
+    const posts = await listPendingThreadPosts(env.DB, userId);
+    if (posts.length === 0) return "予約中のThreads投稿はありません。";
+    return posts
+      .map((p) => `#${p.id} ${formatJstDateTime(p.scheduled_at)}\n${p.text}`)
+      .join("\n\n");
+  }
+
+  // 予約削除
+  if (trimmed.startsWith("スレッド削除")) {
+    const idStr = trimmed.replace("スレッド削除", "").trim();
+    const id = Number(idStr);
+    if (!idStr || Number.isNaN(id)) {
+      return "取り消すThreads予約のIDを指定してください。例: スレッド削除 3";
+    }
+    const deleted = await deleteThreadPost(env.DB, userId, id);
+    return deleted ? `Threads予約 #${id} を取り消しました。` : `#${id} は見つかりませんでした(既に投稿済み/存在しない)。`;
+  }
+
+  // いますぐ投稿
+  if (trimmed.startsWith("スレッド投稿")) {
+    const text = trimmed.replace("スレッド投稿", "").trim();
+    if (!text) return "投稿する本文を指定してください。例: スレッド投稿 こんにちは";
+    if (text.length > THREADS_TEXT_LIMIT) {
+      return `本文が長すぎます(${text.length}文字)。Threadsは${THREADS_TEXT_LIMIT}文字までです。`;
+    }
+    const token = await getValidThreadsToken(env.DB).catch(() => null);
+    if (!token) return notConnected;
+    try {
+      const { permalink } = await publishTextPost(token, text);
+      const who = token.username ? `@${token.username}` : "";
+      return `🧵 Threadsに投稿しました${who ? `(${who})` : ""}。${permalink ? `\n${permalink}` : ""}`;
+    } catch (e) {
+      return `Threadsへの投稿に失敗しました: ${(e as Error).message}`;
+    }
+  }
+
+  // AIが本文を生成して予約
+  if (trimmed.startsWith("スレッド生成")) {
+    if (!env.ANTHROPIC_API_KEY) {
+      return "AI生成には ANTHROPIC_API_KEY が必要です。";
+    }
+    const rest = trimmed.replace("スレッド生成", "").trim();
+    const parsed = parseReminderInput(rest);
+    if ("error" in parsed) {
+      return `日時とテーマを指定してください。例: スレッド生成 明日12:00 今日の一言\n(${parsed.error})`;
+    }
+    let text: string;
+    try {
+      text = await generateThreadPost(env.ANTHROPIC_API_KEY, parsed.content, THREADS_TEXT_LIMIT);
+    } catch (e) {
+      return `本文の生成に失敗しました: ${(e as Error).message}`;
+    }
+    if (!text) return "本文を生成できませんでした。テーマを変えて試してください。";
+    const id = await addThreadPost(env.DB, userId, text, parsed.dueAtUtcIso);
+    return `🧵 AIが本文を作成し、Threads投稿を予約しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)}\n\n${text}`;
+  }
+
+  // 予約投稿(本文は人が用意)
+  if (trimmed.startsWith("スレッド予約")) {
+    const rest = trimmed.replace("スレッド予約", "").trim();
+    const parsed = parseReminderInput(rest);
+    if ("error" in parsed) {
+      return `日時と本文を指定してください。例: スレッド予約 明日9:00 おはようございます\n(${parsed.error})`;
+    }
+    if (parsed.content.length > THREADS_TEXT_LIMIT) {
+      return `本文が長すぎます(${parsed.content.length}文字)。Threadsは${THREADS_TEXT_LIMIT}文字までです。`;
+    }
+    const id = await addThreadPost(env.DB, userId, parsed.content, parsed.dueAtUtcIso);
+    return `🧵 Threads投稿を予約しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)}\n\n${parsed.content}`;
+  }
+
+  return [
+    "Threadsコマンド:",
+    "・スレッド予約 <日時> <本文>",
+    "・スレッド生成 <日時> <テーマ>  (AIが本文作成)",
+    "・スレッド投稿 <本文>  (いますぐ)",
+    "・スレッド一覧 / スレッド削除 <ID>",
+  ].join("\n");
+}
+
+// 予約時刻を過ぎたThreads投稿をまとめて公開する。Cronから毎分呼ばれる。
+async function runThreadPostsIfDue(env: Env): Promise<void> {
+  if (!env.THREADS_APP_ID || !env.THREADS_APP_SECRET) return; // 連携未設定
+  const now = new Date();
+  const due = await getDueThreadPosts(env.DB, now.toISOString());
+  if (due.length === 0) return;
+
+  const token = await getValidThreadsToken(env.DB).catch(() => null);
+  if (!token) return; // 未連携ならpendingのまま残し、連携後に自然に公開される
+
+  const target = await getPushTargetUserId(env);
+  for (const post of due) {
+    try {
+      const { permalink } = await publishTextPost(token, post.text);
+      await markThreadPostPosted(env.DB, post.id, permalink);
+      if (target) {
+        const link = permalink ? `\n${permalink}` : "";
+        await pushText(
+          env.LINE_CHANNEL_ACCESS_TOKEN,
+          target,
+          `🧵 Threadsに自動投稿しました(#${post.id})${link}\n\n${post.text}`
+        );
+      }
+    } catch (e) {
+      const message = (e as Error).message;
+      await markThreadPostFailed(env.DB, post.id, message);
+      if (target) {
+        await pushText(
+          env.LINE_CHANNEL_ACCESS_TOKEN,
+          target,
+          `⚠️ Threadsへの自動投稿に失敗しました(#${post.id})。\n${message}`
+        );
+      }
+    }
+  }
 }
 
 async function runReminderCheck(env: Env): Promise<void> {
@@ -567,6 +768,7 @@ export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runReminderCheck(env));
+    ctx.waitUntil(runThreadPostsIfDue(env));
     ctx.waitUntil(runDailyDigestIfDue(env));
     ctx.waitUntil(runProposalPrepIfDue(env));
     ctx.waitUntil(runInterviewPrepIfDue(env));
