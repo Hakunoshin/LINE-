@@ -48,10 +48,16 @@ function pickCtaText(cta: CtaType, seed: string): string {
 
 // 絵文字・装飾記号(ダイヤ/星/矢印/幾何図形/囲み等)を除去する。日本語の約物・句読点は残す。
 const DECOR_RE =
-  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{25A0}-\u{25FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F1E6}-\u{1F1FF}\u{2605}\u{2606}\u{2665}\u{2764}]/gu;
+  /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{2500}-\u{259F}\u{25A0}-\u{25FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F1E6}-\u{1F1FF}\u{221F}\u{2605}\u{2606}\u{2665}\u{2764}]/gu;
 
 function stripDecor(s: string): string {
-  return s.replace(DECOR_RE, "").replace(/\s+/g, " ").trim();
+  return s
+    .replace(DECOR_RE, "")
+    .replace(/�/g, "")
+    // 企業名除去で生じた「、の…」等の欠けを整える。
+    .replace(/、の(?=[一-龯])/g, "、")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // 企業名(および前後の「株式会社」等)を文中から除去する。
@@ -106,29 +112,30 @@ function pickHook(text: string, company: string): string {
   return snippet(seg, 44);
 }
 
-// 仕事内容(jobDescriptions)から「実際に何をやる仕事か」の1文を取り出す。会社ごとの色を出す。
-function jobSummary(text: string, company: string): string {
+// 仕事内容/待遇などから、見出し・装飾を除いたクリーンな文を最大maxSent文(maxChars字)取り出す。
+// 会社ごとの色を出すために、業務内容を厚めに載せるのに使う。
+function cleanSentences(text: string, company: string, maxSent: number, maxChars: number): string {
   if (!text) return "";
-  let t = stripDecor(stripCompany(text, company)).replace(/�/g, "").trim();
-  let prev = "";
-  do {
-    prev = t;
-    t = t.replace(/^[\s＼／\\｜|・:：\-–—「」『』（）()]+/, "");
-    t = t.replace(
-      /^(?:【[^】]{0,18}】|＜[^＞]{0,18}＞|≪[^≫]{0,18}≫|具体的には|具体的に|仕事内容|職務内容|業務内容)[…：:!！]?\s*/i,
-      ""
-    );
-  } while (t !== prev);
-  t = t.trim();
-  if (!t) return "";
-  // 途中に「具体的な仕事内容」等の見出しが来たらそこで切る。
-  const hdr = t.search(/(具体的な仕事内容|具体的には|職務内容|業務内容)/);
-  let seg = hdr > 12 ? t.slice(0, hdr) : t.slice(0, 64);
-  const cut = seg.slice(12).search(/[。！!]/);
-  if (cut >= 0) seg = seg.slice(0, 12 + cut + 1);
-  seg = seg.replace(/[。\s]+$/, "").trim();
-  if (seg.length < 8) return "";
-  return snippet(seg, 56);
+  let t = stripDecor(stripCompany(text, company))
+    .replace(/＜[^＞]*＞/g, " ")
+    .replace(/【[^】]{0,20}】/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // 後続の別セクション見出しが来たらそこで切る。
+  const hdr = t.search(/(具体的な仕事内容|職務内容|業務内容|＜?給与|＜?勤務地|待遇・福利厚生|応募資格|募集背景)/);
+  if (hdr > 20) t = t.slice(0, hdr);
+  let out = "";
+  let count = 0;
+  const re = /[^。！!]*[。！!]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(t)) && count < maxSent) {
+    if ((out + m[0]).length > maxChars + 8) break;
+    out += m[0];
+    count++;
+  }
+  out = out.replace(/^[、。\s]+/, "").trim();
+  if (!out) out = snippet(t, maxChars);
+  return out;
 }
 
 // アピール本文から、求人票に書かれた訴求フレーズを最大n個抽出する(引用に使う)。
@@ -139,11 +146,11 @@ function extractAppealPhrases(text: string, company: string, n: number): string[
     .map((s) => stripDecor(s.replace(/^[\s：:・\-–—「」『』]+/, "").replace(/[「」『』]/g, "")))
     .filter(
       (s) =>
-        s.length >= 7 &&
-        s.length <= 22 &&
+        s.length >= 8 &&
+        s.length <= 26 &&
         !/^(ポイント|PR|POINT|概要)/i.test(s) &&
         !/(について|における)$/.test(s) &&
-        !/[のにをでとがはやな、]$/.test(s)
+        !/[のにをでとがはやな、り]$/.test(s)
     )
     .slice(0, n);
 }
@@ -161,11 +168,18 @@ export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
 
   const lines: string[] = [hook, ""];
 
-  // 「実際に何をやる仕事か」を1行入れて会社ごとの色を出す。無ければ訴求文で代替。
+  // 「実際に何をやる仕事か(業務内容)」を厚めに入れて会社ごとの色を出す。
   const body =
-    jobSummary(job.description, job.company) ||
-    extractAppealPhrases(appeal, job.company, 3).find((p) => !hook.includes(p));
-  if (body && !hook.includes(body)) lines.push(body);
+    cleanSentences(job.description, job.company, 3, 210) ||
+    (extractAppealPhrases(appeal, job.company, 1)[0] ?? "");
+  if (body && !hook.includes(body)) lines.push(body, "");
+
+  // 求人票の訴求文を数点引用。
+  const phrases = extractAppealPhrases(appeal, job.company, 3).filter(
+    (p) => !hook.includes(p) && !body.includes(p)
+  );
+  for (const p of phrases) lines.push(p);
+  if (phrases.length) lines.push("");
 
   // 条件は1行にまとめる(箇条書きにしない)。
   const cond: string[] = [];
@@ -173,6 +187,10 @@ export function buildTemplatePost(job: CircusJob, cta: CtaType): string {
   if (job.holidays) cond.push(`年間休日${job.holidays}日`);
   if (/未経験|不問/.test(job.minQualification)) cond.push("未経験歓迎");
   if (cond.length) lines.push(cond.join(" / "));
+
+  // 待遇の一言(あれば)。
+  const bens = extractAppealPhrases(job.benefitsNote, job.company, 2);
+  if (bens.length) lines.push(`待遇: ${bens.join(" / ")}`);
 
   lines.push("", pickCtaText(cta, hook));
   return truncateForThreads(lines.join("\n"));
@@ -196,7 +214,7 @@ export async function generateThreadsPostFromText(
     "与えられた求人票1件を、Threadsで反応(閲覧・いいね・返信・リポスト)が伸びる投稿文にしてください。",
     "",
     "制約:",
-    "- Threadsは短い投稿ほど伸びるので、全体を短くまとめる(目安150〜250文字、長くても300文字以内)。",
+    "- 全体で350〜450文字程度のしっかりした分量にする(Threadsの上限500文字は超えない)。",
     "- 日本語。プレーンテキスト(Markdown記法は使わない)。",
     "- 1行目は最重要。求人票の『アピールポイント』の一番刺さる要素を活かして、思わず読みたくなる強いフックにする。",
     "- 『実際に何をやる仕事か(業務内容)』を具体的に1〜2文で入れる。ここで会社ごとの色を出す(例:全国のイベント会場でPR/ジュエリーの査定・買取/都内でのタクシー乗務 など)。",
