@@ -32,9 +32,8 @@ import {
   getThreadsInsights,
   type ThreadsConfig,
 } from "./threads";
-import { generateThreadsPostFromText, buildTemplatePost, analyzePerformance, type CtaType } from "./threadsContent";
-import { fetchCircusPublicJob, extractCircusJobUrls, circusJobToText, type CircusJob } from "./circus";
-import { DEFAULT_JOB_URLS } from "./jobs";
+import { analyzePerformance } from "./threadsContent";
+import { buildEmpathyPost, type PostPattern } from "./posts";
 
 export interface Env {
   DB: D1Database;
@@ -82,33 +81,27 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
-// 求人(circus公開URL) → Threads自動投稿。既定は9:00/15:00/21:00 JSTの1日3回、各回ランダムに1件。
-const DEFAULT_THREADS_AUTOPOST_TIMES = ["08:00", "13:00", "17:00", "21:00"];
+// 共感投稿 → Threads自動投稿。既定は3時間おき・1日8回(各回パターンをA/Bで選び1件投稿)。
+const DEFAULT_THREADS_AUTOPOST_TIMES = [
+  "00:00",
+  "03:00",
+  "06:00",
+  "09:00",
+  "12:00",
+  "15:00",
+  "18:00",
+  "21:00",
+];
 // 投稿指標の収集+分析を回す時刻(1日1回)。
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
-const THREADS_POST_COMMAND = "求人投稿";
+const THREADS_POST_COMMAND = "投稿";
 
-// 「投稿テスト」コマンドで送る秘書通知のサンプル本文(実投稿はしない)。
-const SAMPLE_POST_TEXT = [
-  "「稼ぎたい」を本気で叶えられる営業職",
-  "",
-  "全国の商業施設やイベント会場で、来場したお客様に自社サービスの魅力を伝えるイベント営業のお仕事です。飛び込みやテレアポは一切なし。興味を持って集まってくれた方に、丁寧にご案内していくスタイルなので、営業未経験からでも安心してスタートできます。",
-  "",
-  "完全未経験から1年で年収450万円も",
-  "研修とOJTでしっかりサポート",
-  "",
-  "想定年収 400〜1000万円 / 年間休日128日 / 未経験歓迎",
-  "待遇: 交通費全額支給 / 各種社会保険完備",
-  "",
-  "少しでも気になったら、気軽にDMください。",
-].join("\n");
-
-// CTA(DM誘導/コメント誘導)のA/Bテスト設定。
-const CTA_TYPES: CtaType[] = ["dm", "comment"];
-// 各CTAがこの件数(指標付き)に達するまではランダムに出して探索する。
-const CTA_MIN_SAMPLES = 3;
+// 投稿パターン(keyword=キーワード型 / choice=二択型)のA/Bテスト設定。
+const PATTERNS: PostPattern[] = ["keyword", "choice"];
+// 各パターンがこの件数(指標付き)に達するまではランダムに出して探索する。
+const PATTERN_MIN_SAMPLES = 3;
 // 探索率: この確率で勝ってる方でなくランダムに選ぶ(ε-greedy)。
-const CTA_EPSILON = 0.25;
+const PATTERN_EPSILON = 0.25;
 
 const HELP_TEXT = [
   "使えるコマンド:",
@@ -118,8 +111,7 @@ const HELP_TEXT = [
   "・一覧  … 未通知のリマインダーを表示",
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
-  "・求人投稿  … 求人リストからランダムに1件を今すぐThreadsへ投稿",
-  "・投稿テスト  … 「投稿した体」の秘書通知だけを送る(Threadsには投稿しない)",
+  "・投稿  … 共感投稿を1件、今すぐThreadsへ投稿(動作確認用)",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -328,21 +320,14 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
   }
 
-  if (trimmed === "投稿テスト" || trimmed === "通知テスト" || trimmed === "Threadsテスト") {
-    // 実際にはThreadsへ投稿せず、「投稿した体」の秘書通知だけを本番と同じ形式で送る。
-    await notifyOwnerOfPost(env, { postedText: SAMPLE_POST_TEXT, cta: "dm", company: "株式会社サンプル" });
-    return "秘書からの投稿通知をテスト送信しました。この直後に届くメッセージが、実際の自動投稿時と同じ形式です(Threadsへの投稿はしていません)。";
-  }
-
-  if (trimmed === THREADS_POST_COMMAND || trimmed === "Threads投稿") {
+  if (trimmed === THREADS_POST_COMMAND || trimmed === "求人投稿" || trimmed === "Threads投稿") {
     if (!isThreadsConfigured(env)) {
       return `Threadsが未連携です。${baseUrl}/threads/start から連携してください。`;
     }
-    const result = await postRandomJobToThreads(env);
+    const result = await postEmpathyPost(env);
     if (result.postedText) {
-      const cta = result.cta ? ` (導線: ${ctaLabel(result.cta)})` : "";
-      const company = `企業: ${result.company || "(企業名なし)"}`;
-      return `Threadsに投稿しました。${cta}\n${company}\n\n${result.postedText}`;
+      const label = result.cta ? ` (${patternLabel(result.cta)})` : "";
+      return `Threadsに投稿しました。${label}\n\n${result.postedText}`;
     }
     return `投稿できませんでした: ${result.error ?? "不明なエラー"}`;
   }
@@ -589,30 +574,27 @@ async function resolveThreadsConfig(env: Env): Promise<ThreadsConfig | null> {
 
 interface PostResult {
   postedText?: string;
-  cta?: CtaType;
-  company?: string; // どの企業の求人票を使ったか(秘書通知用。公開投稿には出さない)
-  sourceUrl?: string; // 元のcircus求人URL
+  cta?: PostPattern;
   error?: string;
 }
 
-function randomCta(): CtaType {
-  return CTA_TYPES[Math.floor(Math.random() * CTA_TYPES.length)];
+function randomPattern(): PostPattern {
+  return PATTERNS[Math.floor(Math.random() * PATTERNS.length)];
 }
 
-// どちらのCTAを使うかをε-greedyで決める。
-// 各CTAが十分なサンプルを持つまではランダム(探索)、揃ったら平均エンゲージメントが高い方を
-// 確率(1-ε)で採用し、εの確率では引き続きランダムに探索する。
-async function chooseCta(env: Env): Promise<CtaType> {
+// どちらの投稿パターン(keyword/choice)を使うかをε-greedyで決める。
+// 各パターンが十分なサンプルを持つまではランダム(探索)、揃ったら平均エンゲージメントが
+// 高い方を確率(1-ε)で採用し、εの確率では引き続きランダムに探索する。
+async function chooseCta(env: Env): Promise<PostPattern> {
   const stats = await getCtaStats(env.DB);
   const byType = new Map(stats.map((s) => [s.cta_type, s]));
-  const enough = CTA_TYPES.every((t) => (byType.get(t)?.n ?? 0) >= CTA_MIN_SAMPLES);
-  if (!enough || Math.random() < CTA_EPSILON) {
-    return randomCta();
+  const enough = PATTERNS.every((t) => (byType.get(t)?.n ?? 0) >= PATTERN_MIN_SAMPLES);
+  if (!enough || Math.random() < PATTERN_EPSILON) {
+    return randomPattern();
   }
-  // 平均エンゲージメントが高い方を採用。
-  let best: CtaType = CTA_TYPES[0];
+  let best: PostPattern = PATTERNS[0];
   let bestAvg = -1;
-  for (const t of CTA_TYPES) {
+  for (const t of PATTERNS) {
     const avg = byType.get(t)?.avg_engagement ?? 0;
     if (avg > bestAvg) {
       bestAvg = avg;
@@ -622,84 +604,22 @@ async function chooseCta(env: Env): Promise<CtaType> {
   return best;
 }
 
-// 投稿対象の求人URL一覧を返す。JOBS_PAGE_URLがあればそのページから抽出、無ければ既定リスト。
-async function getJobUrls(env: Env): Promise<string[]> {
-  if (env.JOBS_PAGE_URL) {
-    try {
-      const res = await fetch(env.JOBS_PAGE_URL, { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (res.ok) {
-        const urls = extractCircusJobUrls(await res.text());
-        if (urls.length > 0) return urls;
-      }
-    } catch {
-      // 取得失敗時は既定リストにフォールバック
-    }
-  }
-  return DEFAULT_JOB_URLS;
-}
-
-// 求人URLリストからランダムに1件選び、circusから内容を取得して投稿文を生成、Threadsへ投稿する。
-// 投稿文はClaudeが「これまで伸びた傾向(learnings)」を踏まえて生成し、
-// 投稿本文は分析用にthreads_post_metricsへ記録する。
-async function postRandomJobToThreads(env: Env): Promise<PostResult> {
-  await setAppState(env.DB, "post_stage", "1_start");
+// 共感投稿プールから1件選んでThreadsへ投稿する。
+// パターンはA/Bで選び、本文は直前と重複しないよう選ぶ。指標はthreads_post_metricsに記録。
+async function postEmpathyPost(env: Env): Promise<PostResult> {
   const threads = await resolveThreadsConfig(env);
   if (!threads) {
     return { error: "Threads未連携です。/threads/start から連携してください。" };
   }
-
-  const urls = await getJobUrls(env);
-  if (urls.length === 0) {
-    return { error: "投稿できる求人URLがありません(src/jobs.ts または JOBS_PAGE_URL を設定してください)。" };
-  }
-
-  // 直前に投稿したURLは(他に候補があれば)避けて、連続同一投稿を防ぐ。
-  const lastUrl = await getAppState(env.DB, "last_posted_job_url");
-  const candidates = urls.length > 1 ? urls.filter((u) => u !== lastUrl) : urls;
-  const url = candidates[Math.floor(Math.random() * candidates.length)];
-
-  // circusの公開URLから求人内容を取得する。
-  await setAppState(env.DB, "post_stage", "2_fetching");
-  let job: CircusJob;
-  try {
-    job = await fetchCircusPublicJob(url);
-  } catch (e) {
-    await setAppState(env.DB, "post_stage", `error_fetch:${(e as Error).message}`.slice(0, 90));
-    return { error: `求人取得に失敗: ${(e as Error).message}` };
-  }
-  const jobId = job.id || url;
-  await setAppState(env.DB, "post_stage", "3_job_fetched");
-
-  // A/Bテストで今回のCTA(DM誘導 or コメント誘導)を決める。
-  const cta = await chooseCta(env);
-
-  // 投稿文を生成。APIキーがあればClaudeが「伸びる型(learnings)」を反映して作文＋企業名を匿名化。
-  // 無ければ構造化テンプレート(企業名は機械的に除去)で組み立てる。どちらも企業名は出さない。
-  const learnings = await getAppState(env.DB, "threads_post_learnings");
-  let text = buildTemplatePost(job, cta);
-  if (env.ANTHROPIC_API_KEY) {
-    try {
-      text = await generateThreadsPostFromText(
-        env.ANTHROPIC_API_KEY,
-        circusJobToText(job),
-        learnings,
-        cta,
-        job.company
-      );
-    } catch {
-      text = buildTemplatePost(job, cta);
-    }
-  }
-
-  await setAppState(env.DB, "post_stage", "4_posting");
+  const pattern = await chooseCta(env);
+  const last = await getAppState(env.DB, "last_posted_text");
+  const text = buildEmpathyPost(pattern, last ?? undefined);
   try {
     const mediaId = await postThreadsText(threads, text);
-    await insertPostMetric(env.DB, mediaId, `circus:${jobId}`, text, cta);
-    await setAppState(env.DB, "last_posted_job_url", url);
-    await setAppState(env.DB, "post_stage", "5_done");
-    return { postedText: text, cta, company: job.company, sourceUrl: url };
+    await insertPostMetric(env.DB, mediaId, `empathy:${pattern}`, text, pattern);
+    await setAppState(env.DB, "last_posted_text", text);
+    return { postedText: text, cta: pattern };
   } catch (e) {
-    await setAppState(env.DB, "post_stage", `error_posting:${(e as Error).message}`.slice(0, 80));
     return { error: `投稿に失敗: ${(e as Error).message}` };
   }
 }
@@ -713,45 +633,27 @@ function getThreadsAutopostTimes(env: Env): string[] {
     .filter(Boolean);
 }
 
-function ctaLabel(cta?: CtaType): string {
-  if (cta === "dm") return "DM誘導";
-  if (cta === "comment") return "コメント誘導";
+function patternLabel(p?: PostPattern): string {
+  if (p === "keyword") return "キーワード型";
+  if (p === "choice") return "二択型";
   return "";
 }
 
-// 投稿結果を「秘書からの報告」としてLINEに通知する。
-// どの企業の求人票を使ったか・元URL・導線(CTA)・投稿本文を添える(通知は本人のみ)。
-async function notifyOwnerOfPost(env: Env, result: PostResult): Promise<void> {
-  const target = await getPushTargetUserId(env);
-  if (!target || !result.postedText) return;
-  const lines = [
-    `秘書です。以下の求人をThreadsに投稿しました🧵${result.cta ? ` (導線: ${ctaLabel(result.cta)})` : ""}`,
-  ];
-  lines.push(`企業: ${result.company || "(企業名なし)"}`);
-  if (result.sourceUrl) lines.push(`🔗 ${result.sourceUrl}`);
-  lines.push("", result.postedText);
-  await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, lines.join("\n"));
-}
-
-// 求人URLリストからランダムに1件Threadsへ自動投稿する。既定は9:00/15:00/21:00 (JST) の1日3回実行。
+// 共感投稿を自動投稿する。既定は3時間おき・1日8回。投稿完了のLINE通知は行わない。
 async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
   const now = new Date();
   const nowHm = currentJstHm(now);
   if (!getThreadsAutopostTimes(env).includes(nowHm)) return;
   if (!isThreadsConfigured(env)) return; // 未連携なら何もしない
 
-  // 「日付+時刻」単位で送信済みを記録し、同じ時刻枠での二重投稿(cron再試行等)を防ぐ。
+  // 「日付+時刻」単位で記録し、同じ時刻枠での二重投稿(cron再試行等)を防ぐ。
   const slotKey = `${jstDateKey(now)} ${nowHm}`;
   const lastKey = await getAppState(env.DB, "last_threads_autopost_slot");
   if (lastKey === slotKey) return; // その時刻枠は処理済み
 
-  const result = await postRandomJobToThreads(env);
-  if (!result.postedText) {
-    // 投稿に失敗したときはstateを更新せず、次の分に再試行させる。
-    return;
-  }
+  const result = await postEmpathyPost(env);
+  if (!result.postedText) return; // 失敗時はstate未更新で次分に再試行
   await setAppState(env.DB, "last_threads_autopost_slot", slotKey);
-  await notifyOwnerOfPost(env, result);
 }
 
 function getThreadsInsightsTime(env: Env): string {
