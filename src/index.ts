@@ -8,6 +8,13 @@ import {
   markNotified,
   getAppState,
   setAppState,
+  getThreadsTokens,
+  addThreadsPost,
+  getThreadsPost,
+  markThreadsPosted,
+  markThreadsFailed,
+  setThreadsPostStatus,
+  listRecentThreadsPosts,
 } from "./db";
 import { parseReminderInput, formatJstDateTime, currentJstHm, jstDateKey, jstTodayRangeUtc, jstTomorrowRangeUtc, jstDateOnlyUtc } from "./dateParser";
 import {
@@ -21,6 +28,14 @@ import {
 } from "./google";
 import { handleWithAi } from "./ai";
 import { getTodayWeather } from "./weather";
+import {
+  buildThreadsAuthUrl,
+  exchangeThreadsCode,
+  getValidThreadsToken,
+  postThread,
+  generateThreadsPost,
+  resolveThreadsPersona,
+} from "./threads";
 
 export interface Env {
   DB: D1Database;
@@ -40,10 +55,22 @@ export interface Env {
   WEATHER_LATITUDE?: string;
   WEATHER_LONGITUDE?: string;
   WEATHER_LOCATION_NAME?: string;
+  // Threads(Meta)連携。Meta for DevelopersのThreadsアプリのID/シークレット。
+  THREADS_APP_ID?: string;
+  THREADS_APP_SECRET?: string;
+  // Threadsへ自動投稿するJSTの時刻("HH:MM"のカンマ区切り)。未設定なら DEFAULT_THREADS_POST_TIMES。
+  THREADS_POST_TIMES_JST?: string;
+  // 生成する投稿のアカウント像・発信テーマ。未設定ならthreads.tsの既定ペルソナ。
+  THREADS_PERSONA?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
 const TASK_COMMAND = "【タスク】";
+
+// Threads自動投稿の既定時刻(JST)。THREADS_POST_TIMES_JST で上書き可。
+const DEFAULT_THREADS_POST_TIMES = ["09:00", "21:00"];
+// 生成時に重複回避の文脈として渡す直近投稿数
+const THREADS_RECENT_CONTEXT = 8;
 
 // 企業提案の準備タスク自動生成(当日分)
 const PROPOSAL_MARKER = "【企業提案】";
@@ -67,6 +94,10 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
+  "・スレッズ  … Threads自動投稿の状態を表示",
+  "・スレッズ連携  … Threadsアカウントを連携するURLを表示",
+  "・スレッズ下書き  … AIが投稿文を生成し、承認ボタン付きで表示(押すと投稿)",
+  "・スレッズ投稿  … AIが投稿文を生成して今すぐThreadsへ投稿",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -108,6 +139,46 @@ app.get("/oauth/callback", async (c) => {
     return c.text(`Google連携に失敗しました: ${(e as Error).message}`, 500);
   }
   return c.text("Google連携が完了しました。このタブは閉じて大丈夫です。");
+});
+
+app.get("/threads/oauth/start", (c) => {
+  const { THREADS_APP_ID } = c.env;
+  if (!THREADS_APP_ID) {
+    return c.text("THREADS_APP_ID が設定されていません。", 500);
+  }
+  const redirectUri = new URL("/threads/oauth/callback", c.req.url).toString();
+  return c.redirect(buildThreadsAuthUrl(THREADS_APP_ID, redirectUri));
+});
+
+app.get("/threads/oauth/callback", async (c) => {
+  const { THREADS_APP_ID, THREADS_APP_SECRET } = c.env;
+  if (!THREADS_APP_ID || !THREADS_APP_SECRET) {
+    return c.text("THREADS_APP_ID / THREADS_APP_SECRET が設定されていません。", 500);
+  }
+  const code = c.req.query("code");
+  const error = c.req.query("error");
+  if (error) {
+    return c.text(`Threads認証がキャンセルまたは失敗しました: ${error}`, 400);
+  }
+  if (!code) {
+    return c.text("codeパラメータがありません。", 400);
+  }
+  // ThreadsはリダイレクトURIにcodeの後ろへ「#_」を付ける場合があるため除去する
+  const cleanCode = code.replace(/#_$/, "");
+  const redirectUri = new URL("/threads/oauth/callback", c.req.url).toString();
+  try {
+    const { username } = await exchangeThreadsCode(
+      THREADS_APP_ID,
+      THREADS_APP_SECRET,
+      redirectUri,
+      cleanCode,
+      c.env.DB
+    );
+    const who = username ? `(@${username})` : "";
+    return c.text(`Threads連携が完了しました${who}。このタブは閉じて大丈夫です。`);
+  } catch (e) {
+    return c.text(`Threads連携に失敗しました: ${(e as Error).message}`, 500);
+  }
 });
 
 app.post("/webhook", async (c) => {
@@ -157,7 +228,10 @@ app.post("/webhook", async (c) => {
   return c.text("ok");
 });
 
-// ToDo完了ボタンのポストバック(data="done:<taskId>")を処理する
+// ボタン(ポストバック)を処理する。
+//   done:<taskId>       … ToDo完了
+//   threads_pub:<postId> … Threads下書きを投稿
+//   threads_skip:<postId>… Threads下書きを却下
 async function handlePostback(env: Env, data: string): Promise<string> {
   if (data.startsWith("done:")) {
     const taskId = data.slice("done:".length);
@@ -170,6 +244,32 @@ async function handlePostback(env: Env, data: string): Promise<string> {
       return `完了処理に失敗しました: ${(e as Error).message}`;
     }
   }
+
+  if (data.startsWith("threads_pub:")) {
+    const id = Number(data.slice("threads_pub:".length));
+    if (Number.isNaN(id)) return "不明な操作です。";
+    const post = await getThreadsPost(env.DB, id);
+    if (!post) return "対象の下書きが見つかりませんでした。";
+    if (post.status === "posted") return "この下書きは既に投稿済みです。";
+    const token = await getValidThreadsToken(env.DB);
+    if (!token) return "Threadsと連携されていません。「スレッズ連携」で連携してください。";
+    try {
+      const mediaId = await postThread(token.access_token, token.user_id, post.text);
+      await markThreadsPosted(env.DB, id, mediaId);
+      return `🧵 Threadsに投稿しました。\n\n${post.text}`;
+    } catch (e) {
+      await markThreadsFailed(env.DB, id, (e as Error).message);
+      return `Threadsへの投稿に失敗しました: ${(e as Error).message}`;
+    }
+  }
+
+  if (data.startsWith("threads_skip:")) {
+    const id = Number(data.slice("threads_skip:".length));
+    if (Number.isNaN(id)) return "不明な操作です。";
+    await setThreadsPostStatus(env.DB, id, "skipped");
+    return "下書きを却下しました。";
+  }
+
   return "不明な操作です。";
 }
 
@@ -363,6 +463,61 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     }
 
     return `リマインダーを登録しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)} ${parsed.content}${googleNote}`;
+  }
+
+  if (trimmed === "スレッズ" || trimmed === "threads" || trimmed === "Threads") {
+    return await buildThreadsStatus(env, baseUrl);
+  }
+
+  if (trimmed === "スレッズ連携" || trimmed === "Threads連携") {
+    return `Threadsを連携します。以下のURLにブラウザでアクセスして許可してください。\n${baseUrl}/threads/oauth/start`;
+  }
+
+  if (trimmed === "スレッズ下書き" || trimmed === "スレッズドラフト") {
+    if (!env.ANTHROPIC_API_KEY) {
+      return "ANTHROPIC_API_KEY が未設定のため投稿文を生成できません。";
+    }
+    try {
+      const recent = await getRecentThreadsTexts(env);
+      const text = await generateThreadsPost(
+        env.ANTHROPIC_API_KEY,
+        resolveThreadsPersona(env.THREADS_PERSONA),
+        recent
+      );
+      const id = await addThreadsPost(env.DB, text, "draft", "draft");
+      return buildThreadsDraftFlex(id, text);
+    } catch (e) {
+      return `下書きの生成に失敗しました: ${(e as Error).message}`;
+    }
+  }
+
+  if (trimmed === "スレッズ投稿" || trimmed === "スレッズ即投稿") {
+    if (!env.ANTHROPIC_API_KEY) {
+      return "ANTHROPIC_API_KEY が未設定のため投稿文を生成できません。";
+    }
+    const token = await getValidThreadsToken(env.DB);
+    if (!token) {
+      return `Threadsと連携されていません。\n${baseUrl}/threads/oauth/start から連携してください。`;
+    }
+    try {
+      const recent = await getRecentThreadsTexts(env);
+      const text = await generateThreadsPost(
+        env.ANTHROPIC_API_KEY,
+        resolveThreadsPersona(env.THREADS_PERSONA),
+        recent
+      );
+      const id = await addThreadsPost(env.DB, text, "posting", "manual");
+      try {
+        const mediaId = await postThread(token.access_token, token.user_id, text);
+        await markThreadsPosted(env.DB, id, mediaId);
+        return `🧵 Threadsに投稿しました。\n\n${text}`;
+      } catch (e) {
+        await markThreadsFailed(env.DB, id, (e as Error).message);
+        return `Threadsへの投稿に失敗しました: ${(e as Error).message}`;
+      }
+    } catch (e) {
+      return `投稿処理に失敗しました: ${(e as Error).message}`;
+    }
   }
 
   // コマンドに一致しない自由文はClaude(AI)が処理する
@@ -563,6 +718,146 @@ async function runInterviewPrepIfDue(env: Env): Promise<void> {
   }
 }
 
+// ---- Threads(Meta)自動投稿 ----
+
+function getThreadsPostTimes(env: Env): string[] {
+  const raw = env.THREADS_POST_TIMES_JST;
+  if (!raw) return DEFAULT_THREADS_POST_TIMES;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// 重複回避の文脈として渡す、直近の投稿本文(投稿済み・下書き)。
+async function getRecentThreadsTexts(env: Env): Promise<string[]> {
+  const recent = await listRecentThreadsPosts(env.DB, THREADS_RECENT_CONTEXT * 2);
+  return recent
+    .filter((p) => p.status === "posted" || p.status === "draft")
+    .slice(0, THREADS_RECENT_CONTEXT)
+    .map((p) => p.text);
+}
+
+// 「スレッズ」コマンドの状態表示テキストを組み立てる。
+async function buildThreadsStatus(env: Env, baseUrl: string): Promise<string> {
+  const tokens = await getThreadsTokens(env.DB);
+  const lines = ["🧵 Threads自動投稿の状態"];
+  lines.push("");
+  if (!tokens) {
+    lines.push("連携: 未連携");
+    lines.push(`連携するには「スレッズ連携」または\n${baseUrl}/threads/oauth/start`);
+    return lines.join("\n");
+  }
+  lines.push(`連携: 済み${tokens.username ? ` (@${tokens.username})` : ""}`);
+  lines.push(`自動投稿時刻(JST): ${getThreadsPostTimes(env).join(" / ")}`);
+  if (!env.ANTHROPIC_API_KEY) {
+    lines.push("※ ANTHROPIC_API_KEY 未設定のため自動生成・自動投稿は動作しません");
+  }
+
+  const recent = await listRecentThreadsPosts(env.DB, 3);
+  if (recent.length > 0) {
+    lines.push("");
+    lines.push("【直近の投稿】");
+    const statusLabel: Record<string, string> = {
+      posted: "投稿済",
+      draft: "下書き",
+      posting: "処理中",
+      failed: "失敗",
+      skipped: "却下",
+    };
+    for (const p of recent) {
+      const label = statusLabel[p.status] ?? p.status;
+      const head = p.text.length > 40 ? p.text.slice(0, 40) + "…" : p.text;
+      lines.push(`・[${label}] ${head}`);
+    }
+  }
+  lines.push("");
+  lines.push("「スレッズ下書き」で承認式、「スレッズ投稿」で即時投稿できます。");
+  return lines.join("\n");
+}
+
+// 下書きを承認/却下ボタン付きのFlexメッセージに組み立てる。
+function buildThreadsDraftFlex(id: number, text: string): { altText: string; contents: unknown } {
+  const contents = {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "md",
+      contents: [
+        { type: "text", text: "🧵 Threads下書き", weight: "bold", size: "lg" },
+        { type: "separator" },
+        { type: "text", text, wrap: true, size: "sm" },
+        { type: "text", text: `${text.length}文字`, size: "xs", color: "#999999" },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "horizontal",
+      spacing: "sm",
+      contents: [
+        {
+          type: "button",
+          style: "secondary",
+          height: "sm",
+          flex: 2,
+          action: { type: "postback", label: "却下", data: `threads_skip:${id}`, displayText: "却下" },
+        },
+        {
+          type: "button",
+          style: "primary",
+          color: "#000000",
+          height: "sm",
+          flex: 3,
+          action: { type: "postback", label: "投稿する", data: `threads_pub:${id}`, displayText: "投稿する" },
+        },
+      ],
+    },
+  };
+  return { altText: "Threads下書き(承認/却下)", contents };
+}
+
+// 設定した時刻(JST)にAI生成→Threadsへ自動投稿する。cronの二重実行はスロット単位で防ぐ。
+async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
+  const now = new Date();
+  const nowHm = currentJstHm(now);
+  if (!getThreadsPostTimes(env).includes(nowHm)) return;
+  if (!env.ANTHROPIC_API_KEY) return;
+
+  // 同じ時刻枠での二重投稿(cron再試行等)を防ぐため、生成・投稿前にスロットを予約する。
+  // 失敗しても再試行しない(重複投稿を避ける)。失敗はLINEで通知する。
+  const slotKey = `${jstDateKey(now)} ${nowHm}`;
+  const lastSlot = await getAppState(env.DB, "last_threads_post_slot");
+  if (lastSlot === slotKey) return;
+  await setAppState(env.DB, "last_threads_post_slot", slotKey);
+
+  const token = await getValidThreadsToken(env.DB);
+  if (!token) return; // 未連携なら何もしない
+
+  const target = await getPushTargetUserId(env);
+  let postId: number | null = null;
+  try {
+    const recent = await getRecentThreadsTexts(env);
+    const text = await generateThreadsPost(
+      env.ANTHROPIC_API_KEY,
+      resolveThreadsPersona(env.THREADS_PERSONA),
+      recent
+    );
+    postId = await addThreadsPost(env.DB, text, "posting", "auto");
+    const mediaId = await postThread(token.access_token, token.user_id, text);
+    await markThreadsPosted(env.DB, postId, mediaId);
+    if (target) {
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, `🧵 Threadsに自動投稿しました\n\n${text}`);
+    }
+  } catch (e) {
+    const message = (e as Error).message;
+    if (postId !== null) await markThreadsFailed(env.DB, postId, message);
+    if (target) {
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, `⚠️ Threads自動投稿に失敗しました: ${message}`);
+    }
+  }
+}
+
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -571,5 +866,6 @@ export default {
     ctx.waitUntil(runProposalPrepIfDue(env));
     ctx.waitUntil(runInterviewPrepIfDue(env));
     ctx.waitUntil(runTomorrowPreviewIfDue(env));
+    ctx.waitUntil(runThreadsAutoPostIfDue(env));
   },
 };

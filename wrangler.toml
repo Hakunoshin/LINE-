@@ -18,3 +18,7 @@ DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
 WEATHER_LATITUDE = "35.6895"
 WEATHER_LONGITUDE = "139.6917"
 WEATHER_LOCATION_NAME = "東京"
+# ThreadsへAI自動投稿するJSTの時刻。"HH:MM"のカンマ区切りで複数指定可。
+THREADS_POST_TIMES_JST = "09:00,21:00"
+# 生成する投稿のアカウント像・発信テーマ。未設定なら既定ペルソナ(AIクリエイター)。
+# THREADS_PERSONA = "『tetsu_ai_creater』の発信者。生成AI活用・自動化・個人開発のノウハウを発信。"

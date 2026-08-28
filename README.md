@@ -51,6 +51,20 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
 
+### Threads自動投稿（任意）
+
+`tetsu_ai_creater` のような Threads アカウントを連携すると、**Claudeが投稿文を自動生成して、決まった時刻にThreadsへ自動投稿**します。生成のみ／承認式／即時投稿もLINEから操作できます。
+
+- **自動投稿**: `THREADS_POST_TIMES_JST`（既定 `09:00,21:00`）の時刻になると、Claudeがペルソナに沿った投稿文を生成し、直近の投稿と重複しないようにしてThreadsへ投稿。投稿内容はLINEにも通知されます
+- **`スレッズ下書き`**: AIが投稿文を生成し、**承認/却下ボタン付き**でLINEに表示。「投稿する」を押すとThreadsへ投稿
+- **`スレッズ投稿`**: AIが生成して今すぐThreadsへ投稿
+- **`スレッズ`**: 連携状態・自動投稿時刻・直近の投稿を表示
+- **`スレッズ連携`**: 連携用URLを表示
+
+発信テーマ（アカウント像）は `THREADS_PERSONA` で自由に設定できます（未設定ならAIクリエイター向けの既定ペルソナ）。自動投稿には `ANTHROPIC_API_KEY` の設定が必須です。
+
+連携手順は「セットアップ」の最後（Threads連携）を参照してください。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成
@@ -121,7 +135,30 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 ブラウザで `<デプロイURL>/oauth/start` にアクセスし、Google側の同意画面で許可してください。
 「Google連携が完了しました」と表示されれば成功です（`refresh_token` がD1に保存されます）。
 
-### 7. 動作確認
+### 7. Threads連携（自動投稿を使う場合）
+
+1. [Meta for Developers](https://developers.facebook.com/) でアプリを作成し、**Threads API（Use case: Threads）** を追加
+2. Threadsアプリの設定で **クライアントID（App ID）** と **クライアントシークレット（App secret）** を控える
+3. **Redirect Callback URLs** に `<デプロイURL>/threads/oauth/callback` を登録
+   （例: `https://personal-line-agent.<your-subdomain>.workers.dev/threads/oauth/callback`）
+4. アプリの権限として `threads_basic` と `threads_content_publish` を有効化し、
+   投稿するThreadsアカウントを **Threadsテスター** として追加・承認しておく
+5. IDとシークレットをSecretsに設定する
+
+```bash
+npx wrangler secret put THREADS_APP_ID
+npx wrangler secret put THREADS_APP_SECRET
+```
+
+6. 投稿時刻やペルソナを変えたい場合は `wrangler.toml` の `[vars]` を編集（任意）
+7. LINEで `スレッズ連携` と送るか、ブラウザで `<デプロイURL>/threads/oauth/start` にアクセスして許可
+   「Threads連携が完了しました」と表示されれば成功です（長期トークンがD1に保存され、失効前に自動更新されます）
+8. `スレッズ下書き` で試すと、AIが生成した投稿文が承認ボタン付きでLINEに届きます
+
+> DBマイグレーション（`npm run db:migrate:remote`）を実行済みであることが前提です。
+> 未実行の場合は `migrations/0004_threads.sql` が反映されるよう、先にマイグレーションしてください。
+
+### 8. 動作確認
 
 LINEのトークで以下を試してください。
 
@@ -146,10 +183,12 @@ src/
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
-  db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
+  threads.ts             Threads OAuth2 / 投稿API / Claudeによる投稿文生成
+  db.ts                  D1へのリマインダー・各種トークン・会話履歴・Threads投稿のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
   0001_init.sql          remindersテーブルのスキーマ
   0002_google_integration.sql  google_tokens / app_stateテーブルのスキーマ
   0003_chat_history.sql  chat_historyテーブルのスキーマ
+  0004_threads.sql       threads_tokens / threads_postsテーブルのスキーマ
 ```
