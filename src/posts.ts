@@ -1,21 +1,13 @@
 // Threadsに投稿する「転職潜在層向けの共感投稿」プール。
-// 求人票の宣伝ではなく、今の会社にモヤモヤしている会社員の共感を呼び、
-// プロフ→DM相談(リード獲得)に繋げるのが目的。
+// 求人票の宣伝ではなく、今の会社にモヤモヤしている会社員の共感を呼ぶのが目的。
 //
-// 2パターン:
-//   keyword … キーワード指定型(【モヤモヤ】とDM)
-//   choice  … 二択・診断型(【耐える】か【転職】をDM)
-// 本文(body)はローテーションし、末尾に各パターンのDM誘導(CTA)を付ける。
-// どちらのパターンが伸びるかは投稿指標をもとにA/B(ε-greedy)で自動最適化する。
-
+// ※ 以前は末尾にDM誘導(CTA)を付けていたが、宣伝色・怪しさが出るため一旦廃止。
+//   いまは共感の本文のみを投稿する(DM/コメント誘導なし)。
+//
+// 2つの文体プールを持ち、どちらが伸びるかを投稿指標をもとにA/B(ε-greedy)で自動最適化する:
+//   keyword … 一人称の「気づき」型(独白調のフック)
+//   choice  … 「迷い」を言語化する型(二択で揺れる心情)
 export type PostPattern = "keyword" | "choice";
-
-const CTA: Record<PostPattern, string> = {
-  keyword:
-    "人によって、置かれている状況も正解も本当に違います。もし『今の会社、なんか違うな…』とモヤモヤされているなら、プロフィールから気軽に【モヤモヤ】とDMを送ってください。愚痴を聞くような感覚で、必ずお返事します。",
-  choice:
-    "『今の環境でまだ頑張るべきか』『それとも今すぐ転職活動を始めるべきか』、迷いますよね。もし白黒つけられずに悩まれているなら、プロフィールから【耐える】か【転職】か、今の気持ちをDMで送ってみてください。客観的にアドバイスします。",
-};
 
 // 本文はできるだけ短く(2〜4行)。フックの1行目で「私のことだ」と思わせる。
 // 1行目は心の声の引用としてやや崩すが、地の文の語尾は敬語(です・ます)で統一する。
@@ -44,12 +36,11 @@ export function empathyPostCount(): number {
   return BODIES.keyword.length + BODIES.choice.length;
 }
 
-// 指定パターンの本文からランダムに1つ選び、CTAを付けた完成テキストを返す。
+// 指定パターンの本文からランダムに1つ選んで返す(DM/コメント誘導は付けない)。
 // avoidText(直前の投稿本文)があれば、それと同一のものは避ける。
 export function buildEmpathyPost(pattern: PostPattern, avoidText?: string): string {
   const bodies = BODIES[pattern];
-  const make = (b: string) => `${b}\n\n${CTA[pattern]}`;
-  const candidates = bodies.filter((b) => make(b) !== avoidText);
+  const candidates = bodies.filter((b) => b !== avoidText);
   const pool = candidates.length > 0 ? candidates : bodies;
-  return make(pool[Math.floor(Math.random() * pool.length)]);
+  return pool[Math.floor(Math.random() * pool.length)];
 }
