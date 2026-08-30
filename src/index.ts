@@ -81,17 +81,8 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
 
-// 共感投稿 → Threads自動投稿。既定は3時間おき・1日8回(各回パターンをA/Bで選び1件投稿)。
-const DEFAULT_THREADS_AUTOPOST_TIMES = [
-  "00:00",
-  "03:00",
-  "06:00",
-  "09:00",
-  "12:00",
-  "15:00",
-  "18:00",
-  "21:00",
-];
+// 共感投稿 → Threads自動投稿。既定は1日4回(6/12/17/21時, 各回パターンをA/Bで選び1件投稿)。
+const DEFAULT_THREADS_AUTOPOST_TIMES = ["06:00", "12:00", "17:00", "21:00"];
 // 投稿指標の収集+分析を回す時刻(1日1回)。
 const DEFAULT_THREADS_INSIGHTS_TIME = "23:30";
 const THREADS_POST_COMMAND = "投稿";

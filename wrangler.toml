@@ -17,9 +17,9 @@ crons = ["* * * * *"]
 # 毎日ダイジェストを送るJSTの時刻。"HH:MM"形式のカンマ区切りで複数指定可。
 DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
 
-# 共感投稿 → Threads自動投稿の実行時刻(JST, カンマ区切り)。3時間おき・1日8回。
+# 共感投稿 → Threads自動投稿の実行時刻(JST, カンマ区切り)。1日4回(6/12/17/21時)。
 # 各回、投稿パターン(キーワード型/二択型)をA/Bで選び、本文プールから1件投稿する。
 # THREADS_APP_ID / THREADS_APP_SECRET はsecretで設定し、/threads/start で連携する。
-THREADS_AUTOPOST_TIME_JST = "00:00,03:00,06:00,09:00,12:00,15:00,18:00,21:00"
+THREADS_AUTOPOST_TIME_JST = "06:00,12:00,17:00,21:00"
 # 投稿指標の収集+分析(伸びる型の学習)を回すJSTの時刻。1日1回。
 THREADS_INSIGHTS_TIME_JST = "23:30"
