@@ -90,9 +90,11 @@ const THREADS_POST_COMMAND = "投稿";
 // 投稿パターン(keyword=キーワード型 / choice=二択型)のA/Bテスト設定。
 const PATTERNS: PostPattern[] = ["keyword", "choice"];
 // 各パターンがこの件数(指標付き)に達するまではランダムに出して探索する。
-const PATTERN_MIN_SAMPLES = 3;
+// 表示数がまだ少なくエンゲージメントがノイズ水準のため、サンプル要件は多めにする。
+const PATTERN_MIN_SAMPLES = 10;
 // 探索率: この確率で勝ってる方でなくランダムに選ぶ(ε-greedy)。
-const PATTERN_EPSILON = 0.25;
+// 現状は1いいね程度で片方に固着してしまうため、探索を多めにして両文体を回す。
+const PATTERN_EPSILON = 0.5;
 
 const HELP_TEXT = [
   "使えるコマンド:",
