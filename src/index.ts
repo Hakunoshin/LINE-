@@ -21,6 +21,9 @@ import {
 } from "./google";
 import { handleWithAi } from "./ai";
 import { getTodayWeather } from "./weather";
+import { getThreadsToken, recordThreadsPost, getRecentThreadsPosts } from "./db";
+import { getValidThreadsToken, resolveThreadsUserId, publishThreadsText } from "./threads";
+import { generateThreadsPost } from "./threadsContent";
 
 export interface Env {
   DB: D1Database;
@@ -40,9 +43,18 @@ export interface Env {
   WEATHER_LATITUDE?: string;
   WEATHER_LONGITUDE?: string;
   WEATHER_LOCATION_NAME?: string;
+  // Threads(スレッズ)自動投稿。長期アクセストークンはsecretで設定する。
+  THREADS_ACCESS_TOKEN?: string;
+  // ThreadsユーザーID(任意)。未設定なら /me から自動解決する。
+  THREADS_USER_ID?: string;
+  // 自動投稿するJST時刻("HH:MM"のカンマ区切り)。未設定なら DEFAULT_THREADS_POST_TIMES。
+  THREADS_POST_TIMES_JST?: string;
+  // "off" にすると自動投稿を停止する(既定はon。ただしトークン未設定なら投稿しない)。
+  THREADS_AUTO_POST?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
+const DEFAULT_THREADS_POST_TIMES = ["08:00", "12:30", "19:00"];
 const TASK_COMMAND = "【タスク】";
 
 // 企業提案の準備タスク自動生成(当日分)
@@ -67,6 +79,9 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
+  "・Threads下書き  … 自動投稿と同じAIでThreadsの下書きだけ作成(投稿しない)",
+  "・Threads投稿  … 下書きをその場で生成してThreadsへ即時投稿",
+  "・Threads状態  … 自動投稿の設定状況を表示",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -291,6 +306,32 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     } catch (e) {
       return `ToDoの取得に失敗しました: ${(e as Error).message}`;
     }
+  }
+
+  if (trimmed === "Threads下書き" || trimmed === "スレッズ下書き" || trimmed === "threads下書き") {
+    if (!env.ANTHROPIC_API_KEY) {
+      return "ANTHROPIC_API_KEY が未設定のため下書きを生成できません。";
+    }
+    try {
+      const recent = await getRecentThreadsPosts(env.DB, 10);
+      const text = await generateThreadsPost(env.ANTHROPIC_API_KEY, recent);
+      return `📝 Threads下書き(投稿はしていません)\n──────────\n${text}\n──────────\nこのまま投稿するなら「Threads投稿」と送ってください。`;
+    } catch (e) {
+      return `下書きの生成に失敗しました: ${(e as Error).message}`;
+    }
+  }
+
+  if (trimmed === "Threads投稿" || trimmed === "スレッズ投稿" || trimmed === "threads投稿") {
+    try {
+      const { text, id } = await postToThreadsNow(env);
+      return `🧵 Threadsに投稿しました (id: ${id})\n──────────\n${text}`;
+    } catch (e) {
+      return `Threadsへの投稿に失敗しました: ${(e as Error).message}`;
+    }
+  }
+
+  if (trimmed === "Threads状態" || trimmed === "スレッズ状態" || trimmed === "threads状態") {
+    return await buildThreadsStatus(env);
   }
 
   if (trimmed === "一覧" || trimmed === "リスト") {
@@ -563,6 +604,104 @@ async function runInterviewPrepIfDue(env: Env): Promise<void> {
   }
 }
 
+// ===== Threads(スレッズ)自動投稿 =====
+
+function getThreadsPostTimes(env: Env): string[] {
+  const raw = env.THREADS_POST_TIMES_JST;
+  if (!raw) return DEFAULT_THREADS_POST_TIMES;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// トークンが(secretかD1のいずれかで)利用可能かどうか
+async function hasThreadsToken(env: Env): Promise<boolean> {
+  if (env.THREADS_ACCESS_TOKEN) return true;
+  return (await getThreadsToken(env.DB)) !== null;
+}
+
+// 下書きを生成(未指定時)してThreadsへ投稿し、投稿履歴に記録する。
+async function postToThreadsNow(env: Env, presetText?: string): Promise<{ text: string; id: string }> {
+  const token = await getValidThreadsToken(env.DB, env.THREADS_ACCESS_TOKEN);
+  if (!token) {
+    throw new Error("Threadsアクセストークンが未設定です。`wrangler secret put THREADS_ACCESS_TOKEN` で設定してください。");
+  }
+  const userId = env.THREADS_USER_ID || (await resolveThreadsUserId(env.DB, token));
+
+  let text = presetText;
+  if (!text) {
+    if (!env.ANTHROPIC_API_KEY) {
+      throw new Error("ANTHROPIC_API_KEY が未設定のため本文を生成できません。");
+    }
+    const recent = await getRecentThreadsPosts(env.DB, 10);
+    text = await generateThreadsPost(env.ANTHROPIC_API_KEY, recent);
+  }
+
+  const id = await publishThreadsText(token, userId, text);
+  await recordThreadsPost(env.DB, text, id);
+  return { text, id };
+}
+
+async function buildThreadsStatus(env: Env): Promise<string> {
+  const tokenReady = await hasThreadsToken(env);
+  const autoOff = (env.THREADS_AUTO_POST ?? "").toLowerCase() === "off";
+  const times = getThreadsPostTimes(env).join(" / ");
+  const lastPost = await getAppState(env.DB, "last_threads_post_at");
+  const recent = await getRecentThreadsPosts(env.DB, 1);
+
+  const lines = [
+    "🧵 Threads自動投稿の状態",
+    "",
+    `・アクセストークン: ${tokenReady ? "設定済み ✅" : "未設定 ❌ (secretで設定が必要)"}`,
+    `・自動投稿: ${autoOff ? "停止中(THREADS_AUTO_POST=off)" : tokenReady ? "有効 ✅" : "待機中(トークン未設定)"}`,
+    `・投稿時刻(JST): ${times}`,
+    `・直近の自動投稿枠: ${lastPost ?? "なし"}`,
+  ];
+  if (recent.length > 0) {
+    lines.push("", "直近の投稿:", recent[0]);
+  }
+  if (!tokenReady) {
+    lines.push("", "セットアップ手順はREADMEの「Threads自動投稿」を参照してください。");
+  }
+  return lines.join("\n");
+}
+
+// 設定した時刻(JST)に、求人・自社PR系の投稿を自動生成してThreadsへ公開する。
+// 同一時刻枠での二重投稿を防ぐため、投稿前にstateで枠を確保する(外部への投稿は取り消せないため)。
+async function runThreadsAutoPostIfDue(env: Env): Promise<void> {
+  if ((env.THREADS_AUTO_POST ?? "").toLowerCase() === "off") return;
+
+  const now = new Date();
+  const nowHm = currentJstHm(now);
+  if (!getThreadsPostTimes(env).includes(nowHm)) return;
+
+  if (!(await hasThreadsToken(env))) return; // トークン未設定なら何もしない
+
+  const slotKey = `${jstDateKey(now)} ${nowHm}`;
+  const lastSlot = await getAppState(env.DB, "last_threads_post_at");
+  if (lastSlot === slotKey) return;
+
+  // 投稿前に枠を確保 → 生成/公開が失敗しても同じ枠で再投稿(二重投稿)しない
+  await setAppState(env.DB, "last_threads_post_at", slotKey);
+
+  const target = await getPushTargetUserId(env);
+  try {
+    const { text } = await postToThreadsNow(env);
+    if (target) {
+      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, `🧵 Threadsに自動投稿しました:\n\n${text}`);
+    }
+  } catch (e) {
+    if (target) {
+      await pushText(
+        env.LINE_CHANNEL_ACCESS_TOKEN,
+        target,
+        `⚠️ Threads自動投稿に失敗しました(${nowHm}枠): ${(e as Error).message}`
+      );
+    }
+  }
+}
+
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -571,5 +710,6 @@ export default {
     ctx.waitUntil(runProposalPrepIfDue(env));
     ctx.waitUntil(runInterviewPrepIfDue(env));
     ctx.waitUntil(runTomorrowPreviewIfDue(env));
+    ctx.waitUntil(runThreadsAutoPostIfDue(env));
   },
 };

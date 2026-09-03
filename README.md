@@ -51,6 +51,40 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
 
+### Threads自動投稿（任意）
+
+Threads（スレッズ）のアクセストークンを設定すると、決まった時刻（JST、既定 `08:00,12:30,19:00`）に
+求人・自社PR系の投稿を Claude が自動生成し、Threads へ自動投稿します。投稿するとLINEにも通知が届きます。
+
+- **`THREADS_POST_TIMES_JST`**（`wrangler.toml` の `[vars]`）… 投稿時刻をカンマ区切りで変更可
+- **`THREADS_AUTO_POST`** … `off` にすると自動投稿を停止（既定 `on`。トークン未設定のうちは投稿しません）
+- 直近の投稿は D1 に記録され、次の生成時にAIへ渡して内容の重複を避けます
+
+LINEから手動でも操作できます。
+
+- `Threads下書き` … 自動投稿と同じAIで下書きだけ作成（投稿しない。プレビュー用）
+- `Threads投稿` … その場で生成して即時投稿
+- `Threads状態` … トークン設定状況・投稿時刻・直近投稿を表示
+
+#### セットアップ手順
+
+1. [Meta for Developers](https://developers.facebook.com/) で作成済みのアプリに **Threads API** を追加し、
+   `threads_basic` と `threads_content_publish` の権限を付与する
+2. 対象アカウント（`hakusan_tensyoku`）で認可し、**長期アクセストークン（60日）** を発行する
+   （アプリのGraph API Explorer等でユーザートークンを取得後、長期トークンに交換）
+3. 発行したトークンを secret に設定する
+
+   ```bash
+   npx wrangler secret put THREADS_ACCESS_TOKEN
+   ```
+
+4. デプロイ後、LINEで `Threads状態` を送って「設定済み ✅」を確認する
+5. `Threads下書き` で文面のトーンを確認し、問題なければ `Threads投稿` で実投稿をテストする
+
+> トークンは60日で失効しますが、本アプリが期限の5日前から自動更新してD1にキャッシュします
+> （更新は発行から24時間以上経過したトークンが対象）。ユーザーIDは初回に `/me` から自動取得します。
+> `THREADS_USER_ID` を `wrangler.toml` に設定すれば固定もできます。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成

@@ -139,6 +139,55 @@ export async function appendChatHistory(
     .run();
 }
 
+// ===== Threads(スレッズ)自動投稿 =====
+
+export interface ThreadsTokenRow {
+  access_token: string;
+  expires_at: string | null;
+}
+
+export async function getThreadsToken(db: D1Database): Promise<ThreadsTokenRow | null> {
+  const result = await db
+    .prepare("SELECT access_token, expires_at FROM threads_tokens WHERE id = 1")
+    .first<ThreadsTokenRow>();
+  return result ?? null;
+}
+
+export async function saveThreadsToken(
+  db: D1Database,
+  accessToken: string,
+  expiresAtUtcIso: string | null
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO threads_tokens (id, access_token, expires_at, updated_at)
+       VALUES (1, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET access_token = excluded.access_token,
+         expires_at = excluded.expires_at, updated_at = datetime('now')`
+    )
+    .bind(accessToken, expiresAtUtcIso)
+    .run();
+}
+
+export async function recordThreadsPost(
+  db: D1Database,
+  text: string,
+  mediaId: string | null
+): Promise<void> {
+  await db
+    .prepare("INSERT INTO threads_posts (text, media_id) VALUES (?, ?)")
+    .bind(text, mediaId)
+    .run();
+}
+
+export async function getRecentThreadsPosts(db: D1Database, limit: number): Promise<string[]> {
+  const result = await db
+    .prepare("SELECT text FROM threads_posts ORDER BY id DESC LIMIT ?")
+    .bind(limit)
+    .all<{ text: string }>();
+  return (result.results ?? []).map((r) => r.text);
+}
+
 export async function setAppState(db: D1Database, key: string, value: string): Promise<void> {
   await db
     .prepare(

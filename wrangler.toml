@@ -18,3 +18,10 @@ DAILY_DIGEST_TIME_JST = "07:30,13:00,18:00"
 WEATHER_LATITUDE = "35.6895"
 WEATHER_LONGITUDE = "139.6917"
 WEATHER_LOCATION_NAME = "東京"
+# Threads自動投稿する時刻(JST, "HH:MM"のカンマ区切りで複数可)
+THREADS_POST_TIMES_JST = "08:00,12:30,19:00"
+# Threads自動投稿の有効/無効。"off"で停止。既定は有効だが、
+# THREADS_ACCESS_TOKEN(secret)が未設定のうちは投稿しない。
+THREADS_AUTO_POST = "on"
+# ThreadsユーザーIDを固定したい場合に設定(未設定なら /me から自動取得)
+# THREADS_USER_ID = ""
