@@ -51,6 +51,56 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 APIキーは [Anthropic Console](https://platform.claude.com/) で発行できます（従量課金）。
 
+### note自動投稿（任意）
+
+AI（Claude）が記事を書いて [note](https://note.com) に自動投稿します。手動コマンドと、決まった時刻に自動投稿するスケジュールの2通りで使えます。
+
+> ⚠️ **重要**: note には公式の投稿APIがありません。ここではブラウザが使う非公式の内部API
+> （`/api/v1/text_notes`）を利用しています。note側の仕様変更で**予告なく動かなくなる可能性**があります。
+> また、noteのログインは現在 reCAPTCHA 必須のため、**メール+パスワードでの自動ログインはできません**。
+> 代わりに「ブラウザで一度ログインして取得したセッションCookie」を使い回します。
+
+**1. セッションCookieを取得して設定**
+
+1. PCのブラウザ（Chrome推奨）で https://note.com にログイン
+2. DevTools（F12）→ Application → Cookies → `https://note.com`
+3. `_note_session_v5` の**値**をコピー
+4. Secretとして登録:
+
+```bash
+npx wrangler secret put NOTE_SESSION_COOKIE
+```
+
+Cookieはいずれ失効します。投稿に失敗し始めたら、同じ手順で取得し直して設定を上書きしてください。
+
+**2. まず下書きで動作確認**（推奨）
+
+LINEで次のように送ると、AIが記事を書いて note に**下書き保存**します（公開はされません）。
+
+```
+note下書き 転職の面接対策
+note下書き            ← テーマ省略時はキャリア系のデフォルトから自動選択
+```
+
+返信のURL（`.../edit`）からnoteのエディタで内容を確認できます。問題なければ公開に進みます。
+
+**3. 公開・定期自動投稿**
+
+- LINEで `note投稿 <テーマ>` … その場で**公開**まで行う
+- 定期自動投稿は `wrangler.toml` の `[vars]` を設定（`NOTE_POST_TIME_JST` を設定すると有効化）:
+
+| 変数 | 説明 | 例 |
+| --- | --- | --- |
+| `NOTE_POST_TIME_JST` | 自動投稿する時刻(JST)。未設定なら定期投稿しない | `09:00` |
+| `NOTE_POST_DOW` | 投稿する曜日(0=日〜6=土)のカンマ区切り。未設定なら毎日 | `1,3,5` |
+| `NOTE_TOPICS` | 記事テーマ候補（改行 or `\|` 区切り、日付でローテーション） | `面接対策\|職務経歴書` |
+| `NOTE_AUTOPUBLISH` | `true` で実際に公開。**既定は下書き保存のみ** | `true` |
+
+安全のため、定期自動投稿の既定動作は**下書き保存**です。数回下書きで内容を確認し、問題なければ
+`NOTE_AUTOPUBLISH = "true"` にして公開に切り替えてください。自動投稿の結果（タイトル・URL）はLINEにも通知されます。
+
+記事生成には `ANTHROPIC_API_KEY` が必要です（AI応答と共通）。
+
 ## セットアップ
 
 ### 1. LINE Developersでチャネルを作成
@@ -146,6 +196,7 @@ src/
   ai.ts                  Claude APIによる自由文応答エージェント(ツール付き)
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
+  note.ts                note内部APIクライアント + AIによる記事生成
   db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/
