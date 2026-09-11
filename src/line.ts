@@ -36,7 +36,7 @@ export async function verifyLineSignature(
 export interface LineTextMessageEvent {
   type: string;
   replyToken?: string;
-  source: { type: string; userId?: string };
+  source: { type: string; userId?: string; groupId?: string; roomId?: string };
   message?: { type: string; text?: string };
   postback?: { data: string };
 }

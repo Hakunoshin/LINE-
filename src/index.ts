@@ -121,6 +121,10 @@ app.post("/webhook", async (c) => {
   const body = JSON.parse(rawBody) as LineWebhookBody;
 
   for (const event of body.events) {
+    // 1対1トーク以外(グループ/複数人トーク)では一切反応しない。
+    // グループ追加時に無言にし、他人のメッセージで配信先が上書きされるのも防ぐ。
+    if (event.source.type !== "user") continue;
+
     const userId = event.source.userId;
     if (!userId || !event.replyToken) continue;
 
