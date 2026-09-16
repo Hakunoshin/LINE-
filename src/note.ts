@@ -6,11 +6,13 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { currentJstString } from "./dateParser";
+import type { YouTubeVideo } from "./youtube";
 
 export interface NoteArticle {
   title: string;
   body: string; // noteエディタに貼り付けやすいプレーンテキスト本文
   tags: string[];
+  source?: YouTubeVideo; // 着想元の動画(あれば末尾に出典を付ける)
 }
 
 const ARTICLE_SYSTEM = [
@@ -28,21 +30,39 @@ const ARTICLE_SYSTEM = [
   "- 誇張や不正確な断定を避け、一次情報が必要な具体的な数値・固有名詞は書かない。",
 ].join("\n");
 
-// テーマからnote記事(タイトル・本文・タグ)を生成する。
-export async function generateArticle(apiKey: string, theme: string): Promise<NoteArticle> {
+// note記事を生成する。videoを渡すと、その動画タイトルに着想を得たオリジナル記事を書く。
+export async function generateArticle(
+  apiKey: string,
+  theme: string,
+  opts: { video?: YouTubeVideo } = {}
+): Promise<NoteArticle> {
   const client = new Anthropic({ apiKey });
+
+  const userContent = opts.video
+    ? [
+        `現在(JST): ${currentJstString()}`,
+        "",
+        "以下は音声配信『芦名勇舗のASH RADIO』の本日の配信タイトルです。",
+        `配信タイトル: ${opts.video.title}`,
+        "",
+        "このタイトル(テーマ)に着想を得て、あなた自身の考えを述べるオリジナルのnote記事を書いてください。",
+        "重要な制約:",
+        "- 配信の中身は不明なので、動画の内容を要約・引用したり、配信で言っていた等の断定はしない。",
+        "- あくまで『このテーマについて自分はこう考える』という一次的な意見・経験として書く。",
+        "- 書き手は人材業界のキャリアアドバイザー(営業・キャリア支援の実務経験あり)という設定で、",
+        "  営業やキャリアの現場目線を自然に織り交ぜる。",
+        "- 本文の冒頭で、今日のASH RADIOのテーマから着想を得た旨に軽く触れてよい(引用にはしない)。",
+        "- 出典リンクは本文に書かない(システム側で末尾に付ける)。",
+      ].join("\n")
+    : `現在(JST): ${currentJstString()}\n\n次のテーマでnote記事を1本書いてください。\nテーマ: ${theme}`;
+
   const response = await client.messages.create({
     model: "claude-opus-4-8",
     max_tokens: 4096,
     thinking: { type: "adaptive" },
     output_config: { effort: "medium" },
     system: ARTICLE_SYSTEM,
-    messages: [
-      {
-        role: "user",
-        content: `現在(JST): ${currentJstString()}\n\n次のテーマでnote記事を1本書いてください。\nテーマ: ${theme}`,
-      },
-    ],
+    messages: [{ role: "user", content: userContent }],
   });
 
   const raw = response.content
@@ -58,12 +78,21 @@ export async function generateArticle(apiKey: string, theme: string): Promise<No
   if (!title || !body) {
     throw new Error("記事生成の結果が不正でした(title/bodyが空)");
   }
-  return { title, body, tags };
+  return { title, body, tags, source: opts.video };
+}
+
+// 記事本文(貼り付け用)を組み立てる。着想元の動画があれば末尾に出典を付ける。
+export function buildNoteBody(article: NoteArticle): string {
+  const tagLine =
+    article.tags.length > 0 ? "\n\n" + article.tags.map((t) => `#${t.replace(/^#/, "")}`).join(" ") : "";
+  const sourceLine = article.source
+    ? `\n\n──────\n参考にした音声配信：芦名勇舗のASH RADIO「${article.source.title}」\n${article.source.url}`
+    : "";
+  return article.body + sourceLine + tagLine;
 }
 
 // 生成記事をLINEに貼り付けやすい1通のテキストに整形する。
 export function formatArticleForLine(article: NoteArticle): string {
-  const tagLine = article.tags.length > 0 ? "\n\n" + article.tags.map((t) => `#${t.replace(/^#/, "")}`).join(" ") : "";
   return [
     `📝 note下書きができました`,
     `━━━━━━━━━━`,
@@ -71,7 +100,7 @@ export function formatArticleForLine(article: NoteArticle): string {
     article.title,
     ``,
     `【本文】`,
-    article.body + tagLine,
+    buildNoteBody(article),
     `━━━━━━━━━━`,
     `↑ この本文をnoteに貼り付けて公開してください`,
   ].join("\n");

@@ -58,16 +58,24 @@ AI（Claude）が [note](https://note.com) 用の記事を書いてLINEに届け
 > note には公式の投稿APIが無く、非公式APIもログイン時のreCAPTCHA等で不安定なため、
 > **記事生成＋LINE配信まで**を自動化し、**公開は手動**にしています（確実・安全）。
 
+**お題は YouTube「ASH RADIO」から自動ピック**
+
+毎回、[芦名勇舗のASH RADIO](https://www.youtube.com/@ash-radio-yusuke-ashina) の最近の動画（RSSの最新15本）から
+**ランダムで1本**選び、そのタイトルを“お題”にしてAIが記事を書きます。直近に使ったお題は記録して
+連続で同じにならないようにしています。
+
+- 動画の中身を要約・引用するのではなく、**タイトルに着想を得た自分視点のオリジナル記事**を書きます
+  （著作権的に安全・オリジナリティも出る）
+- 記事末尾に **参考として動画タイトルとURL** を自動で付けます（＝元動画への動線）
+
 **手動生成（いつでも）**
 
-LINEで次のように送ると、AIが記事を書いて返信します。本文をコピーしてnoteに貼り付けてください。
-
 ```
-note下書き 転職の面接対策
-note下書き            ← テーマ省略時はキャリア系のデフォルトから自動選択
+note下書き          ← ASH RADIOからお題を自動選択して生成
+note下書き 転職の面接対策   ← テーマを指定して生成
 ```
 
-（`note記事 <テーマ>` でも同じ動作です）
+（`note記事` でも同じ動作です）
 
 **定期自動生成**
 
@@ -78,7 +86,8 @@ note下書き            ← テーマ省略時はキャリア系のデフォル
 | --- | --- | --- |
 | `NOTE_POST_TIME_JST` | 自動生成する時刻(JST)。未設定なら定期生成しない | `09:00` |
 | `NOTE_POST_DOW` | 生成する曜日(0=日〜6=土)のカンマ区切り。未設定なら毎日 | `1,3,5` |
-| `NOTE_TOPICS` | 記事テーマ候補（改行 or `\|` 区切り、日付でローテーション） | `面接対策\|職務経歴書` |
+| `NOTE_YOUTUBE_CHANNEL_ID` | お題を拾うYouTubeチャンネルID。未設定ならASH RADIO。空文字で無効化 | `UCX-nFhpazzoU5NZfgPGXI2Q` |
+| `NOTE_TOPICS` | チャンネル無効時のテーマ候補（改行 or `\|` 区切り） | `面接対策\|職務経歴書` |
 
 記事生成には `ANTHROPIC_API_KEY` が必要です（AI応答と共通）。届いた記事を確認・微修正してから公開できるので、内容をコントロールしやすい運用です。
 
@@ -178,6 +187,7 @@ src/
   line.ts                LINE Messaging APIの署名検証・reply・push
   google.ts              Google OAuth2 / Calendar / Tasks APIクライアント
   note.ts                AIによるnote記事生成 + LINE配信用の整形
+  youtube.ts             YouTube RSSからお題動画を取得(APIキー不要)
   db.ts                  D1へのリマインダー・Googleトークン・会話履歴のCRUD
   dateParser.ts          日本語の日時表現パーサー・JST変換ユーティリティ
 migrations/

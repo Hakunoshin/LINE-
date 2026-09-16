@@ -21,7 +21,8 @@ import {
 } from "./google";
 import { handleWithAi } from "./ai";
 import { getTodayWeather } from "./weather";
-import { generateArticle, formatArticleForLine } from "./note";
+import { generateArticle, formatArticleForLine, type NoteArticle } from "./note";
+import { fetchChannelVideos, pickRandomVideo } from "./youtube";
 
 export interface Env {
   DB: D1Database;
@@ -51,6 +52,9 @@ export interface Env {
   // 記事テーマの候補。改行または「|」区切り。日付でローテーションして1つ選ぶ。
   // 未設定ならキャリア系のデフォルトテーマを使用。
   NOTE_TOPICS?: string;
+  // 記事のお題を拾うYouTubeチャンネルID。未設定ならash radioを既定で使用。
+  // 明示的に空文字を設定すると無効化され、NOTE_TOPICS/デフォルトを使う。
+  NOTE_YOUTUBE_CHANNEL_ID?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -68,6 +72,11 @@ const INTERVIEW_PREP_TIME_JST = "07:30";
 
 // 翌日の予定を前日夜に予告する時刻 (JST)
 const TOMORROW_PREVIEW_TIME_JST = "21:00";
+
+// 記事のお題を拾うデフォルトのYouTubeチャンネル(芦名勇舗のASH RADIO)
+const ASH_RADIO_CHANNEL_ID = "UCX-nFhpazzoU5NZfgPGXI2Q";
+// 直近使ったお題動画をこの件数だけ記録し、連続で同じ動画を選ばないようにする
+const RECENT_VIDEO_LIMIT = 10;
 
 // note自動投稿でテーマ未設定時に使うデフォルトテーマ(キャリア/転職領域)
 const DEFAULT_NOTE_TOPICS = [
@@ -89,7 +98,8 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
-  "・note下書き <テーマ>  … AIがnote記事を書いて返信(テーマ省略可)。貼り付けて公開",
+  "・note下書き  … ASH RADIOからお題を選びAIがnote記事を書いて返信。貼り付けて公開",
+  "・note下書き <テーマ>  … テーマ指定でも生成可",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -388,12 +398,13 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     return `リマインダーを登録しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)} ${parsed.content}${googleNote}`;
   }
 
-  // note記事の下書きをAIで生成してLINEに返す(テーマ省略可)
-  //   例) note下書き 転職の面接対策    /    note記事 職務経歴書の書き方
+  // note記事の下書きをAIで生成してLINEに返す
+  //   note下書き           → ash radioからランダムにお題を選んで生成
+  //   note下書き <テーマ>   → 指定テーマで生成
   if (trimmed.startsWith("note下書き") || trimmed.startsWith("note記事")) {
     const prefix = trimmed.startsWith("note下書き") ? "note下書き" : "note記事";
     const theme = trimmed.replace(prefix, "").trim();
-    return await generateNoteDraft(env, theme || pickNoteTopic(env));
+    return await generateNoteDraft(env, theme || null);
   }
 
   // コマンドに一致しない自由文はClaude(AI)が処理する
@@ -613,13 +624,45 @@ function pickNoteTopic(env: Env, now: Date = new Date()): string {
   return topics[jstDays % topics.length];
 }
 
+// お題を拾うYouTubeチャンネルIDを解決する。未設定ならash radio、空文字なら無効。
+function getNoteChannelId(env: Env): string | null {
+  const v = env.NOTE_YOUTUBE_CHANNEL_ID;
+  if (v === undefined) return ASH_RADIO_CHANNEL_ID; // 未設定なら既定
+  return v.trim() === "" ? null : v.trim();
+}
+
+// 日次記事を1本生成する。チャンネルが有効なら動画タイトルに着想を得て書き、
+// 取れなければトピックにフォールバックする。使ったお題動画は直近リストに記録する。
+async function buildDailyArticle(env: Env, apiKey: string): Promise<NoteArticle> {
+  const channelId = getNoteChannelId(env);
+  if (channelId) {
+    try {
+      const videos = await fetchChannelVideos(channelId);
+      const recent = ((await getAppState(env.DB, "note_recent_video_ids")) ?? "").split(",").filter(Boolean);
+      const video = pickRandomVideo(videos, recent);
+      if (video) {
+        const article = await generateArticle(apiKey, video.title, { video });
+        const nextRecent = [video.videoId, ...recent.filter((id) => id !== video.videoId)].slice(0, RECENT_VIDEO_LIMIT);
+        await setAppState(env.DB, "note_recent_video_ids", nextRecent.join(","));
+        return article;
+      }
+    } catch {
+      // 動画取得に失敗したらトピックにフォールバック
+    }
+  }
+  return await generateArticle(apiKey, pickNoteTopic(env));
+}
+
 // 記事をAIで生成し、LINEに貼り付けやすい形で返す。手動・自動の両方から使う。
-async function generateNoteDraft(env: Env, theme: string): Promise<string> {
+// theme が null のときは日次ソース(ash radio等)からお題を自動選択する。
+async function generateNoteDraft(env: Env, theme: string | null): Promise<string> {
   if (!env.ANTHROPIC_API_KEY) {
     return "ANTHROPIC_API_KEY が未設定のため記事を生成できません。";
   }
   try {
-    const article = await generateArticle(env.ANTHROPIC_API_KEY, theme);
+    const article = theme
+      ? await generateArticle(env.ANTHROPIC_API_KEY, theme)
+      : await buildDailyArticle(env, env.ANTHROPIC_API_KEY);
     return formatArticleForLine(article);
   } catch (e) {
     return `note記事の生成に失敗しました: ${(e as Error).message}`;
@@ -650,9 +693,8 @@ async function runNoteDraftIfDue(env: Env): Promise<void> {
   const target = await getPushTargetUserId(env);
   if (!target) return; // 送信先が未登録なら生成しない
 
-  const theme = pickNoteTopic(env, now);
   try {
-    const article = await generateArticle(env.ANTHROPIC_API_KEY, theme);
+    const article = await buildDailyArticle(env, env.ANTHROPIC_API_KEY);
     await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, formatArticleForLine(article));
     // 成功したら記録し、その日は再生成しない
     await setAppState(env.DB, "last_note_post_date", todayKey);
