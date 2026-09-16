@@ -21,7 +21,7 @@ import {
 } from "./google";
 import { handleWithAi } from "./ai";
 import { getTodayWeather } from "./weather";
-import { generateArticle, postArticle } from "./note";
+import { generateArticle, formatArticleForLine } from "./note";
 
 export interface Env {
   DB: D1Database;
@@ -41,19 +41,16 @@ export interface Env {
   WEATHER_LATITUDE?: string;
   WEATHER_LONGITUDE?: string;
   WEATHER_LOCATION_NAME?: string;
-  // --- note自動投稿(任意) ---
-  // ブラウザでnoteにログインして取得した _note_session_v5 Cookieの値。
-  // 未設定ならnote関連機能はすべて無効。
-  NOTE_SESSION_COOKIE?: string;
-  // 自動投稿するJST時刻 ("HH:MM")。未設定なら定期自動投稿を行わない(手動コマンドは可)。
+  // --- note記事の下書き自動生成(任意) ---
+  // AIが記事を生成してLINEに届ける。実際の公開はnoteに貼り付けて自分で行う運用。
+  // 生成にはANTHROPIC_API_KEYが必要。
+  // 自動生成するJST時刻 ("HH:MM")。未設定なら定期生成を行わない(手動コマンドは可)。
   NOTE_POST_TIME_JST?: string;
-  // 自動投稿する曜日 (JST, 0=日〜6=土) のカンマ区切り。未設定なら毎日。
+  // 自動生成する曜日 (JST, 0=日〜6=土) のカンマ区切り。未設定なら毎日。
   NOTE_POST_DOW?: string;
   // 記事テーマの候補。改行または「|」区切り。日付でローテーションして1つ選ぶ。
   // 未設定ならキャリア系のデフォルトテーマを使用。
   NOTE_TOPICS?: string;
-  // "true" のとき実際に公開する。それ以外(既定)は下書き保存のみ(安全側)。
-  NOTE_AUTOPUBLISH?: string;
 }
 
 const DEFAULT_DIGEST_TIMES = ["07:30", "13:00", "18:00"];
@@ -92,8 +89,7 @@ const HELP_TEXT = [
   "・削除 <ID>  … リマインダーを削除",
   "・今日 / 【タスク】  … 今日の予定とGoogle Tasksの未完了ToDoを表示",
   "・完了  … 未完了ToDoをボタン付きで表示し、押すと完了にできます",
-  "・note下書き <テーマ>  … AIが記事を書いてnoteに下書き保存(テーマ省略可)",
-  "・note投稿 <テーマ>  … AIが記事を書いてnoteに公開(テーマ省略可)",
+  "・note下書き <テーマ>  … AIがnote記事を書いて返信(テーマ省略可)。貼り付けて公開",
   "・ヘルプ  … このメッセージを表示",
   "",
   "上記以外のメッセージはAI(Claude)が応答します。",
@@ -392,12 +388,12 @@ async function handleCommand(env: Env, userId: string, text: string, baseUrl: st
     return `リマインダーを登録しました。\n#${id} ${formatJstDateTime(parsed.dueAtUtcIso)} ${parsed.content}${googleNote}`;
   }
 
-  // note投稿(公開) / note下書き(下書き保存のみ)
-  //   例) note下書き 転職の面接対策    /    note投稿 職務経歴書の書き方
-  if (trimmed.startsWith("note投稿") || trimmed.startsWith("note下書き")) {
-    const publish = trimmed.startsWith("note投稿");
-    const theme = trimmed.replace(publish ? "note投稿" : "note下書き", "").trim();
-    return await createNotePost(env, theme || pickNoteTopic(env), publish);
+  // note記事の下書きをAIで生成してLINEに返す(テーマ省略可)
+  //   例) note下書き 転職の面接対策    /    note記事 職務経歴書の書き方
+  if (trimmed.startsWith("note下書き") || trimmed.startsWith("note記事")) {
+    const prefix = trimmed.startsWith("note下書き") ? "note下書き" : "note記事";
+    const theme = trimmed.replace(prefix, "").trim();
+    return await generateNoteDraft(env, theme || pickNoteTopic(env));
   }
 
   // コマンドに一致しない自由文はClaude(AI)が処理する
@@ -617,35 +613,24 @@ function pickNoteTopic(env: Env, now: Date = new Date()): string {
   return topics[jstDays % topics.length];
 }
 
-// 記事を生成してnoteに投稿する共通処理。手動コマンドと自動投稿の両方から使う。
-async function createNotePost(env: Env, theme: string, publish: boolean): Promise<string> {
+// 記事をAIで生成し、LINEに貼り付けやすい形で返す。手動・自動の両方から使う。
+async function generateNoteDraft(env: Env, theme: string): Promise<string> {
   if (!env.ANTHROPIC_API_KEY) {
     return "ANTHROPIC_API_KEY が未設定のため記事を生成できません。";
   }
-  if (!env.NOTE_SESSION_COOKIE) {
-    return "NOTE_SESSION_COOKIE が未設定です。noteにブラウザでログインし _note_session_v5 を取得して\nnpx wrangler secret put NOTE_SESSION_COOKIE\nで設定してください。";
-  }
   try {
     const article = await generateArticle(env.ANTHROPIC_API_KEY, theme);
-    const result = await postArticle(env.NOTE_SESSION_COOKIE, article, publish);
-    return [
-      `📝 note${result.status === "published" ? "に公開しました" : "に下書き保存しました"}`,
-      `タイトル: ${article.title}`,
-      `テーマ: ${theme}`,
-      result.url ? `URL: ${result.url}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    return formatArticleForLine(article);
   } catch (e) {
-    return `note投稿に失敗しました: ${(e as Error).message}`;
+    return `note記事の生成に失敗しました: ${(e as Error).message}`;
   }
 }
 
-// NOTE_POST_TIME_JST の時刻(と曜日)になったらnoteへ自動投稿する。
-// 二重投稿は last_note_post_date(JST日付)で防ぐ。既定は下書き保存(NOTE_AUTOPUBLISH=trueで公開)。
-async function runNoteAutoPostIfDue(env: Env): Promise<void> {
+// NOTE_POST_TIME_JST の時刻(と曜日)になったら記事下書きを自動生成してLINEに届ける。
+// 二重生成は last_note_post_date(JST日付)で防ぐ。公開はユーザーが手動で行う。
+async function runNoteDraftIfDue(env: Env): Promise<void> {
   const time = env.NOTE_POST_TIME_JST?.trim();
-  if (!time) return; // 未設定なら定期自動投稿しない
+  if (!time) return; // 未設定なら定期生成しない
   const now = new Date();
   if (currentJstHm(now) !== time) return;
 
@@ -659,33 +644,20 @@ async function runNoteAutoPostIfDue(env: Env): Promise<void> {
 
   const todayKey = jstDateKey(now);
   const lastKey = await getAppState(env.DB, "last_note_post_date");
-  if (lastKey === todayKey) return; // その日は投稿済み
+  if (lastKey === todayKey) return; // その日は生成済み
 
-  if (!env.ANTHROPIC_API_KEY || !env.NOTE_SESSION_COOKIE) return;
+  if (!env.ANTHROPIC_API_KEY) return;
+  const target = await getPushTargetUserId(env);
+  if (!target) return; // 送信先が未登録なら生成しない
 
-  const publish = env.NOTE_AUTOPUBLISH === "true";
   const theme = pickNoteTopic(env, now);
   try {
     const article = await generateArticle(env.ANTHROPIC_API_KEY, theme);
-    const result = await postArticle(env.NOTE_SESSION_COOKIE, article, publish);
-    // 成功したら記録し、その日は再投稿しない
+    await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, formatArticleForLine(article));
+    // 成功したら記録し、その日は再生成しない
     await setAppState(env.DB, "last_note_post_date", todayKey);
-    // 送信先が分かれば結果をLINEに通知する
-    const target = await getPushTargetUserId(env);
-    if (target) {
-      const head = result.status === "published" ? "📝 noteに自動公開しました" : "📝 noteに下書きを自動作成しました";
-      await pushText(
-        env.LINE_CHANNEL_ACCESS_TOKEN,
-        target,
-        [head, `タイトル: ${article.title}`, result.url ? `URL: ${result.url}` : ""].filter(Boolean).join("\n")
-      );
-    }
-  } catch (e) {
-    // 失敗時はstate未更新のまま次の分に再試行される。通知先が分かればエラーを知らせる。
-    const target = await getPushTargetUserId(env);
-    if (target) {
-      await pushText(env.LINE_CHANNEL_ACCESS_TOKEN, target, `note自動投稿に失敗しました: ${(e as Error).message}`);
-    }
+  } catch {
+    // 失敗時はstate未更新のまま次の分に再試行される
   }
 }
 
@@ -697,6 +669,6 @@ export default {
     ctx.waitUntil(runProposalPrepIfDue(env));
     ctx.waitUntil(runInterviewPrepIfDue(env));
     ctx.waitUntil(runTomorrowPreviewIfDue(env));
-    ctx.waitUntil(runNoteAutoPostIfDue(env));
+    ctx.waitUntil(runNoteDraftIfDue(env));
   },
 };
